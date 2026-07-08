@@ -13,18 +13,29 @@ only `constants` and the standard library.
 
 from __future__ import annotations
 
+import collections
 import math
 import random
 from typing import Optional
 
-from market_sim.constants import BASE_COMMISSION_RATE, CORPORATE_BALANCE_FLOOR
+from market_sim.constants import (
+    BASE_COMMISSION_RATE,
+    CORPORATE_BALANCE_FLOOR,
+    LOG_CORPORATE_BALANCE_FLOOR,
+)
+
+# Bounded history horizon: price/balance histories are capped so unbounded
+# runs cannot grow the heap (and thrash the GC) indefinitely. The macro
+# orchestrator keeps its own full-length logs for plotting/export; the
+# asset only ever needs a localized recent window.
+HISTORY_MAXLEN = 4096
 
 
 class LimitOrder:
     """A resting limit order in the book."""
 
     __slots__ = ("order_id", "trader_id", "side", "price", "quantity",
-                 "timestamp", "active", "escrow_rate")
+                 "timestamp", "active", "escrow_rate", "escrow_remaining")
 
     def __init__(self, order_id: int, trader_id: str, side: str,
                  price: float, quantity: int, timestamp: int):
@@ -39,6 +50,11 @@ class LimitOrder:
         # Settlements and refunds use exactly this rate (Part D, fix 1), so
         # dynamic friction can never create or destroy escrowed cash.
         self.escrow_rate = BASE_COMMISSION_RATE
+        # Exact remaining cash escrowed against this order. Fills deduct
+        # from it and the final fill / cancellation releases exactly what
+        # is left, so escrow accounting telescopes bit-for-bit and no cash
+        # can be created or destroyed by partial-fill rounding.
+        self.escrow_remaining = 0.0
 
     def __repr__(self) -> str:
         return (f"LimitOrder(id={self.order_id}, trader={self.trader_id}, "
@@ -75,6 +91,12 @@ class Asset:
 
     Dividends deduct from the balance; the reversion toward the anchor
     models retained earnings rebuilding the balance sheet organically.
+
+    The OU state lives permanently in log space (`_log_balance`): the daily
+    step needs no `math.log()` call at all -- only one `math.exp()` to
+    expose the nominal `balance`. External writes to `balance` (dividend
+    deductions) re-sync the log state through the property setter, which is
+    the only remaining `math.log()` site and runs once per dividend event.
     """
 
     def __init__(self, symbol: str, initial_price: float = 100.0,
@@ -83,14 +105,31 @@ class Asset:
                  fundamental_reversion: float = 0.015,
                  fundamental_vol: float = 0.005):
         self.symbol = symbol
-        self.price_history = [initial_price]
-        self.balance_history = [initial_balance]
-        self.balance = initial_balance
+        self.price_history: collections.deque = collections.deque(
+            [initial_price], maxlen=HISTORY_MAXLEN)
+        self.balance_history: collections.deque = collections.deque(
+            [initial_balance], maxlen=HISTORY_MAXLEN)
         self.fundamental_drift = fundamental_drift
         self.fundamental_reversion = fundamental_reversion
         self.fundamental_vol = fundamental_vol
-        self._log_anchor = math.log(max(initial_balance,
-                                        CORPORATE_BALANCE_FLOOR))
+        self._log_floor = LOG_CORPORATE_BALANCE_FLOOR
+        self.balance = initial_balance    # Property setter seeds _log_balance
+        self._log_anchor = self._log_balance
+
+    # `balance` is a property so external mutations (dividend payouts) keep
+    # the log-space OU state consistent without any log() in the daily loop.
+    @property
+    def balance(self) -> float:
+        return self._balance
+
+    @balance.setter
+    def balance(self, value: float) -> None:
+        if value < CORPORATE_BALANCE_FLOOR:
+            value = CORPORATE_BALANCE_FLOOR
+            self._log_balance = self._log_floor
+        else:
+            self._log_balance = math.log(value)
+        self._balance = value
 
     def record_close(self, price: float) -> None:
         """Appends the daily closing price."""
@@ -99,11 +138,17 @@ class Asset:
     def update_daily_fundamental(self) -> None:
         """One OU step of the balance-sheet information process (Part B)."""
         self._log_anchor += self.fundamental_drift
-        log_b = math.log(max(self.balance, CORPORATE_BALANCE_FLOOR))
+        log_b = self._log_balance
         log_b += self.fundamental_reversion * (self._log_anchor - log_b)
         log_b += random.gauss(0.0, self.fundamental_vol)
-        self.balance = max(math.exp(log_b), CORPORATE_BALANCE_FLOOR)
-        self.balance_history.append(self.balance)
+        if log_b < self._log_floor:
+            log_b = self._log_floor
+            balance = CORPORATE_BALANCE_FLOOR
+        else:
+            balance = math.exp(log_b)
+        self._log_balance = log_b
+        self._balance = balance
+        self.balance_history.append(balance)
 
     def get_last_price(self) -> float:
         """Returns the most recent closing price."""
@@ -115,19 +160,26 @@ class IncrementalEMA:
     O(1) incremental exponential moving average.
 
     Stores only the previous EMA value and an observation counter; one
-    `update()` per observation replaces any O(N) history re-scan.
+    `update()` per observation replaces any O(N) history re-scan. The
+    complementary decay constant is pre-computed once at construction so
+    the hot path performs no repeated subtraction.
     """
+
+    __slots__ = ("alpha", "one_minus_alpha", "value", "count")
 
     def __init__(self, period: int):
         self.alpha = 2.0 / (period + 1.0)
+        self.one_minus_alpha = 1.0 - self.alpha
         self.value: Optional[float] = None
         self.count = 0
 
     def update(self, price: float) -> float:
         """Folds a new observation into the EMA in constant time."""
-        if self.value is None:
-            self.value = price
-        else:
-            self.value = price * self.alpha + self.value * (1.0 - self.alpha)
+        value = self.value
+        if value is not None:            # Hot path: steady-state fold.
+            value = price * self.alpha + value * self.one_minus_alpha
+        else:                            # Cold path: first observation only.
+            value = price
+        self.value = value
         self.count += 1
-        return self.value
+        return value
