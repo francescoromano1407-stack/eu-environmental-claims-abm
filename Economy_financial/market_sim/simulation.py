@@ -8,6 +8,19 @@ trader participation, solvency-constrained dividends, interest accrual,
 bankruptcy reseeding, and the capped logit-driven evolutionary review
 (Part A). `export_simulation_metrics` provides the CSV export pipeline.
 
+Shares outstanding are a structural invariant of the closed system: they
+change only when a bankrupt trader is reseeded. The total is therefore
+maintained as a stateful counter (updated at trader creation/removal)
+instead of being re-summed over every participant inside the per-trader
+decision loop, turning the former O(N^2) daily path into O(N).
+
+Conservation audit hooks: `total_interest_paid`, `total_dividends_paid`,
+`total_reseed_cash` / `total_reseed_shares`, and
+`total_bankrupt_cash_removed` accumulate every flow that legitimately
+enters or leaves the participants' combined ledgers, complementing
+`OrderBook.total_fees_collected` so a closed-system wealth audit can
+balance to numerical precision.
+
 Side-effect isolation: matplotlib is imported lazily inside
 `plot_dashboard`, so importing this module (or the package) performs no
 backend selection, spawns no GUI machinery, and executes nothing at
@@ -20,15 +33,15 @@ import collections
 import csv
 import math
 import random
-import statistics
 from typing import Optional
 
 from market_sim.constants import (
-    BASE_COMMISSION_RATE,
     BASE_DIVIDEND_PER_SHARE,
+    COMMISSION_RATE_SPAN,
     CORPORATE_BALANCE_FLOOR,
     EVOLUTION_EPOCH_DAYS,
     INTENSITY_OF_CHOICE,
+    LAMBDA_MEMORY,
     MAX_SWITCH_FRACTION,
     MIN_COMMISSION_RATE,
     MIN_TOBIN_RATE,
@@ -37,7 +50,7 @@ from market_sim.constants import (
     ORDER_DECAY_MAX_HAZARD,
     STRATEGY_MEMORY,
     SWITCH_CONSIDERATION_RATE,
-    TOBIN_TAX_RATE,
+    TOBIN_RATE_SPAN,
 )
 from market_sim.models import Asset, IncrementalEMA, LimitOrder, MarketOrder
 from market_sim.order_book import OrderBook
@@ -63,6 +76,18 @@ class Simulation:
         self.trader_map: dict[str, Trader] = {}  # ALL participants (incl. MM)
         self.next_trader_id_counter = 0
 
+        # Structural invariant: total float across ALL holders. Updated
+        # only at trader creation/removal (bankruptcy reseeding) -- trades,
+        # escrow moves, dividends and interest never change it.
+        self._shares_outstanding = 0
+
+        # Conservation-audit accumulators (exact flow bookkeeping).
+        self.total_interest_paid = 0.0
+        self.total_dividends_paid = 0.0
+        self.total_reseed_cash = 0.0
+        self.total_reseed_shares = 0
+        self.total_bankrupt_cash_removed = 0.0
+
         # Seed the evolutionary population in three equal cohorts.
         noise_count = num_traders // 3
         fund_count = num_traders // 3
@@ -81,6 +106,7 @@ class Simulation:
             trader_id="T_MM", cash=1_000_000.0, shares=10_000,
             target_inventory=10_000, level_qty=15, num_levels=5)
         self.trader_map["T_MM"] = self.market_maker
+        self._shares_outstanding += self.market_maker.total_shares
 
         # Manipulators -- also full macro participants.
         self.manipulators: list[Manipulator] = []
@@ -90,6 +116,7 @@ class Simulation:
                 spoof_size=400, attack_size=40)
             self.manipulators.append(manip)
             self.trader_map[manip.trader_id] = manip
+            self._shares_outstanding += manip.total_shares
 
         # Asset and book. Part B, fix 3: the corporate balance is seeded
         # from the TRUE float (all holders, incl. MM and Manipulators) so
@@ -118,6 +145,9 @@ class Simulation:
         self.strategy_attractiveness = {s: 0.0 for s in self.STRATEGIES}
         self._epoch_wealth_marker: dict[str, Optional[float]] = {
             s: None for s in self.STRATEGIES}
+        # Per-trader wealth computed by the latest evolutionary review,
+        # reusable by same-day logging (avoids a duplicate wealth pass).
+        self._epoch_wealth_cache: dict[str, float] = {}
 
         # Logging. All strategy series (incl. the two specialist agents).
         self.log_price = [initial_price]
@@ -135,8 +165,8 @@ class Simulation:
         yield from self.manipulators
 
     def total_shares_outstanding(self) -> int:
-        """True float across ALL holders, computed live."""
-        return sum(p.total_shares for p in self.macro_participants())
+        """True float across ALL holders (stateful structural invariant)."""
+        return self._shares_outstanding
 
     def create_and_add_trader(self, trader_type: str,
                               current_day: int = 0) -> Trader:
@@ -146,11 +176,12 @@ class Simulation:
                         trader_type, current_day=current_day)
         self.traders.append(trader)
         self.trader_map[t_id] = trader
+        self._shares_outstanding += trader.total_shares
         return trader
 
     def get_fundamental_value(self) -> float:
-        """Intrinsic value = corporate balance / live shares outstanding."""
-        shares = self.total_shares_outstanding()
+        """Intrinsic value = corporate balance / shares outstanding. O(1)."""
+        shares = self._shares_outstanding
         if shares <= 0:
             return self.asset.get_last_price()
         return self.asset.balance / shares
@@ -159,13 +190,27 @@ class Simulation:
         return (day % 7) == 6 or (day % 7) == 0
 
     def current_volatility(self) -> float:
-        """Relative realised volatility of recent closes (sigma / mean)."""
-        if len(self.recent_closes) < 2:
+        """
+        Relative realised volatility of recent closes (sigma / mean),
+        computed in a single pass over the window (population variance via
+        E[x^2] - E[x]^2 instead of a mean pass followed by a pstdev pass).
+        """
+        closes = self.recent_closes
+        n = len(closes)
+        if n < 2:
             return 0.0
-        mean = statistics.fmean(self.recent_closes)
+        s = 0.0
+        s2 = 0.0
+        for x in closes:
+            s += x
+            s2 += x * x
+        mean = s / n
         if mean <= 0.0:
             return 0.0
-        return statistics.pstdev(self.recent_closes) / mean
+        variance = s2 / n - mean * mean
+        if variance <= 0.0:      # Numerical guard: clamp catastrophic
+            return 0.0           # cancellation residue to zero.
+        return math.sqrt(variance) / mean
 
     # -- macro events ------------------------------------------------------- #
     def pay_dividends(self) -> None:
@@ -189,12 +234,17 @@ class Simulation:
             participant.cash += payout
             total_paid += payout
         self.asset.balance -= total_paid  # guaranteed >= floor by construction
+        self.total_dividends_paid += total_paid
 
     def accrue_interest(self) -> None:
         """Risk-free daily interest on available cash for every holder."""
         daily = self.rf_rate / 365.0
+        accrued = 0.0
         for participant in self.macro_participants():
-            participant.cash += participant.cash * daily
+            delta = participant.cash * daily
+            participant.cash += delta
+            accrued += delta
+        self.total_interest_paid += accrued
 
     # -- fluid friction and LOB decay (Part D) ------------------------------- #
     def update_friction(self) -> None:
@@ -205,19 +255,16 @@ class Simulation:
         costs can no longer paralyse non-speculative flow; in active
         markets it returns to the full statutory level.
         """
-        if self.recent_volumes:
-            short_run = statistics.fmean(self.recent_volumes)
-        else:
-            short_run = 0.0
+        volumes = self.recent_volumes
+        short_run = (sum(volumes) / len(volumes)) if volumes else 0.0
         baseline = self.volume_baseline.value
         if baseline is None or baseline <= 1e-9:
             activity = 0.0
         else:
             activity = min(short_run / baseline, 1.0)
 
-        commission = MIN_COMMISSION_RATE \
-            + (BASE_COMMISSION_RATE - MIN_COMMISSION_RATE) * activity
-        tobin = MIN_TOBIN_RATE + (TOBIN_TAX_RATE - MIN_TOBIN_RATE) * activity
+        commission = MIN_COMMISSION_RATE + COMMISSION_RATE_SPAN * activity
+        tobin = MIN_TOBIN_RATE + TOBIN_RATE_SPAN * activity
         self.order_book.set_friction(commission, tobin)
 
     def decay_resting_orders(self, day: int) -> None:
@@ -232,16 +279,17 @@ class Simulation:
         TTL and vanishing all at once. (The MM refreshes its own quotes
         daily and is exempt.) Cancellation refunds escrow as always.
         """
+        mm_id = self.market_maker.trader_id
+        cancel = self.order_book.cancel_order
         for order in list(self.order_book.orders.values()):
-            owner = self.trader_map.get(order.trader_id)
-            if owner is self.market_maker:
+            if order.trader_id == mm_id:
                 continue
             age = day - order.timestamp
             hazard = min(ORDER_DECAY_MAX_HAZARD,
                          ORDER_DECAY_BASE_HAZARD
                          * (1.0 + age / ORDER_DECAY_AGE_SCALE))
             if random.random() < hazard:
-                self.order_book.cancel_order(order.order_id, self.trader_map)
+                cancel(order.order_id, self.trader_map)
 
     # -- evolutionary review (Part A: logit choice, memory, switch cap) ------ #
     def evolutionary_review(self, day: int, closing_price: float) -> int:
@@ -260,14 +308,24 @@ class Simulation:
           4. Cap: at most MAX_SWITCH_FRACTION of the whole population may
              actually change strategy, structurally bounding herd shocks.
 
+        The per-trader wealth computed here is cached in
+        `_epoch_wealth_cache` so same-day logging can reuse it instead of
+        re-marking the whole population to market.
+
         Returns the number of traders that switched.
         """
-        wealth_by_type = {s: [] for s in self.STRATEGIES}
+        wealth_cache: dict[str, float] = {}
+        wealth_sum = {s: 0.0 for s in self.STRATEGIES}
+        wealth_n = {s: 0 for s in self.STRATEGIES}
         for trader in self.traders:
-            wealth_by_type[trader.type].append(trader.get_wealth(closing_price))
+            w = trader.get_wealth(closing_price)
+            wealth_cache[trader.trader_id] = w
+            wealth_sum[trader.type] += w
+            wealth_n[trader.type] += 1
+        self._epoch_wealth_cache = wealth_cache
         avg_wealth = {
-            s: (sum(v) / len(v) if v else 0.0)
-            for s, v in wealth_by_type.items()
+            s: (wealth_sum[s] / wealth_n[s] if wealth_n[s] else 0.0)
+            for s in self.STRATEGIES
         }
 
         # 1. Epoch performance -> smoothed attractiveness (memory/inertia).
@@ -280,7 +338,7 @@ class Simulation:
                 epoch_return = 0.0   # No comparable history: neutral fitness.
             self.strategy_attractiveness[s] = (
                 STRATEGY_MEMORY * self.strategy_attractiveness[s]
-                + (1.0 - STRATEGY_MEMORY) * epoch_return)
+                + LAMBDA_MEMORY * epoch_return)
             if cur > 0.0:
                 self._epoch_wealth_marker[s] = cur
 
@@ -318,19 +376,38 @@ class Simulation:
                 self.order_book.cancel_order(oid, self.trader_map)
             self.traders.remove(bt)
             del self.trader_map[bt.trader_id]
+            self._shares_outstanding -= bt.total_shares
+            self.total_bankrupt_cash_removed += bt.total_cash
             self.create_and_add_trader(bt.type, current_day=day)
+            self.total_reseed_cash += self.initial_cash
+            self.total_reseed_shares += self.initial_shares
 
     # -- logging ------------------------------------------------------------ #
-    def log_daily_metrics(self, current_price: float) -> None:
+    def log_daily_metrics(self, current_price: float,
+                          wealth_cache: Optional[dict] = None) -> None:
+        """
+        Appends the daily demographic and wealth series. When a
+        `wealth_cache` (trader_id -> wealth, e.g. from the same-day
+        evolutionary review) is supplied, the mark-to-market pass is
+        skipped and the cached values are regrouped by *current* strategy.
+        """
         counts = {s: 0 for s in self.STRATEGIES}
-        wealths = {s: [] for s in self.STRATEGIES}
-        for trader in self.traders:
-            counts[trader.type] += 1
-            wealths[trader.type].append(trader.get_wealth(current_price))
+        sums = {s: 0.0 for s in self.STRATEGIES}
+        if wealth_cache is None:
+            for trader in self.traders:
+                counts[trader.type] += 1
+                sums[trader.type] += trader.get_wealth(current_price)
+        else:
+            for trader in self.traders:
+                counts[trader.type] += 1
+                w = wealth_cache.get(trader.trader_id)
+                if w is None:
+                    w = trader.get_wealth(current_price)
+                sums[trader.type] += w
         for s in self.STRATEGIES:
-            self.log_demographics[s].append(counts[s])
-            self.log_avg_wealth[s].append(
-                sum(wealths[s]) / len(wealths[s]) if wealths[s] else 0.0)
+            n = counts[s]
+            self.log_demographics[s].append(n)
+            self.log_avg_wealth[s].append(sums[s] / n if n else 0.0)
 
         self.log_mm_wealth.append(self.market_maker.get_wealth(current_price))
         if self.manipulators:
@@ -384,9 +461,13 @@ class Simulation:
                 manip.act(self.order_book.get_midpoint(last_price),
                           self.order_book, self.trader_map, day)
 
-            # 5. Evolutionary traders act in randomised order.
+            # 5. Evolutionary traders act in randomised order. The
+            #    fundamental value is a loop invariant (the corporate
+            #    balance and shares outstanding cannot change intraday),
+            #    so it is computed once per day, not once per trader.
             ema_ready = self.ema_slow.count >= 15
             ef, es = self.ema_fast.value, self.ema_slow.value
+            v_fund = self.get_fundamental_value()
 
             active_traders = list(self.traders)
             random.shuffle(active_traders)
@@ -394,7 +475,6 @@ class Simulation:
 
             for trader in active_traders:
                 ref_price = self.order_book.get_midpoint(last_price)
-                v_fund = self.get_fundamental_value()
                 imbalance = self.order_book.get_imbalance(ref_price)
 
                 decision = trader.decide_order(
@@ -435,10 +515,14 @@ class Simulation:
 
             # 7. Closing price: VWAP of the day's executions (a single deep
             #    sweep through a thin level can no longer print the close),
-            #    persisted to the asset history.
-            if day_trades:
-                traded_value = sum(p * q for _, p, q in day_trades)
-                traded_qty = sum(q for _, _, q in day_trades)
+            #    persisted to the asset history. One pass computes traded
+            #    value and volume together (volume feeds step 8).
+            traded_value = 0.0
+            traded_qty = 0
+            for _, p, q in day_trades:
+                traded_value += p * q
+                traded_qty += q
+            if traded_qty > 0:
                 closing_price = traded_value / traded_qty
             else:
                 closing_price = last_price
@@ -450,14 +534,16 @@ class Simulation:
             self.ema_fast.update(closing_price)
             self.ema_slow.update(closing_price)
             self.recent_closes.append(closing_price)
-            day_volume = float(sum(qty for _, _, qty in day_trades))
+            day_volume = float(traded_qty)
             self.recent_volumes.append(day_volume)
             self.volume_baseline.update(day_volume)
 
             # 9. Bankruptcies and (capped, logit-driven) evolution.
             self.handle_bankruptcies(day)
+            epoch_wealth_cache = None
             if day % EVOLUTION_EPOCH_DAYS == 0:
                 switched = self.evolutionary_review(day, closing_price)
+                epoch_wealth_cache = self._epoch_wealth_cache
                 if switched > 0:
                     # Part C, fix 3: the review mass-cancelled the switchers'
                     # resting orders -- backstop any resulting thin spots so
@@ -466,8 +552,8 @@ class Simulation:
                         self.order_book.get_midpoint(closing_price),
                         self.order_book, self.trader_map, day)
 
-            # 10. Log.
-            self.log_daily_metrics(closing_price)
+            # 10. Log (reusing the review's wealth pass on epoch days).
+            self.log_daily_metrics(closing_price, epoch_wealth_cache)
 
         print("Simulation complete.")
 

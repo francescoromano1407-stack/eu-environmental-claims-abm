@@ -2,8 +2,9 @@
 High-performance P2P Limit Order Book.
 
 Bisect-maintained price-time priority arrays with O(1) best-level access,
-lazy tombstone cancellation with periodic compaction, and exact
-double-entry escrow settlement under dynamic friction (Part D, fix 1).
+O(log N) banded depth queries, lazy tombstone cancellation with relative
+(amortized O(1)) compaction, and exact double-entry escrow settlement
+under dynamic friction (Part D, fix 1).
 
 Circular-dependency note: the book operates on `LimitOrder`/`MarketOrder`
 instances and a `trader_map` of participants, but it never constructs
@@ -45,17 +46,30 @@ class OrderBook:
 
     Cancellations are O(1) and lazy: the order is tombstoned
     (`active = False`), refunded immediately, and physically removed only
-    when it surfaces at the top of the book or during periodic compaction.
+    when it surfaces at the top of the book or during compaction. The
+    compaction trigger is *relative*: a sweep runs only when tombstones
+    exceed COMPACT_RATIO of all resting entries (with a small absolute
+    floor), so the O(N) rebuild is amortized O(1) per cancellation at any
+    book size while cache locality stays bounded.
 
     Part D, fix 1 -- dynamic friction with exact escrow accounting:
     `commission_rate` and `tobin_rate` are set daily by the Simulation.
     Takers pay the rate in force at execution. Makers' cash escrow is taken
-    at the rate in force at placement, which is stored on the order
-    (`escrow_rate`) and used verbatim for both settlement and refund, so no
-    cash can appear or vanish when the rate moves while an order rests.
+    at the rate in force at placement, tracked exactly on the order
+    (`escrow_remaining`): every partial fill deducts its slice, and the
+    final fill or cancellation releases exactly the remainder, so escrowed
+    cash telescopes bit-for-bit -- no cash can appear or vanish through
+    partial-fill rounding (this replaces the old refund-truncation guard,
+    which silently destroyed precision residue).
+
+    `total_fees_collected` accumulates the exact cash removed from the
+    participants' combined ledgers by commissions and Tobin taxes, enabling
+    closed-system conservation audits.
     """
 
-    COMPACT_THRESHOLD = 256
+    COMPACT_THRESHOLD = 256   # Retained for API compatibility (legacy abs.)
+    COMPACT_MIN_DEAD = 64     # Never sweep for fewer tombstones than this.
+    COMPACT_RATIO = 0.20      # Sweep when dead / total entries exceeds this.
 
     def __init__(self):
         self._bids: list[tuple] = []
@@ -65,6 +79,7 @@ class OrderBook:
         self.order_id_counter = 0
         self.commission_rate = BASE_COMMISSION_RATE
         self.tobin_rate = TOBIN_TAX_RATE
+        self.total_fees_collected = 0.0           # Exact fee/tax drain audit
 
     # -- friction ------------------------------------------------------------#
     def set_friction(self, commission_rate: float, tobin_rate: float) -> None:
@@ -117,26 +132,31 @@ class OrderBook:
     # -- depth inspection (used by the Manipulator, imbalance, MM backstop) - #
     def depth_within(self, side: str, mid: float, band: float,
                      exclude_trader: Optional[str] = None) -> int:
-        """Total active quantity on one side within `band` of the mid."""
+        """
+        Total active quantity on one side within `band` of the mid.
+
+        O(log N + M): the band boundary is located with a binary search on
+        the sorted key arrays (the in-band region is always a suffix, since
+        the best order sits at the end), then only the M in-band entries
+        are summed -- no linear scan of the full side.
+        """
         total = 0
         if side == 'BUY':
+            # Bid keys ascend with price: in-band == price >= floor_price.
+            # The probe key (floor_price,) sorts before every real key with
+            # that price, so bisect_left lands on the band's first entry.
             floor_price = mid * (1.0 - band)
-            for _, order in reversed(self._bids):
-                if not order.active:
-                    continue
-                if order.price < floor_price:
-                    break
-                if order.trader_id != exclude_trader:
-                    total += order.quantity
+            entries = self._bids
+            lo = bisect.bisect_left(entries, ((floor_price,),))
         else:
+            # Ask keys ascend with -price: in-band == price <= cap_price.
             cap_price = mid * (1.0 + band)
-            for _, order in reversed(self._asks):
-                if not order.active:
-                    continue
-                if order.price > cap_price:
-                    break
-                if order.trader_id != exclude_trader:
-                    total += order.quantity
+            entries = self._asks
+            lo = bisect.bisect_left(entries, ((-cap_price,),))
+        for i in range(lo, len(entries)):
+            order = entries[i][1]
+            if order.active and order.trader_id != exclude_trader:
+                total += order.quantity
         return total
 
     def get_imbalance(self, mid: float, band: float = IMBALANCE_BAND,
@@ -151,15 +171,19 @@ class OrderBook:
 
     # -- cancellation (O(1); this remains the ONLY removal path) ------------ #
     def cancel_order(self, order_id: int, trader_map: dict) -> bool:
-        """Cancels a resting order and refunds its escrow. O(1)."""
+        """Cancels a resting order and refunds its escrow exactly. O(1)."""
         order = self.orders.get(order_id)
         if order is None or not order.active:
             return False
 
         trader = trader_map[order.trader_id]
         if order.side == 'BUY':
-            refund = order.price * order.quantity * (1.0 + order.escrow_rate)
-            refund = min(refund, trader.cash_reserved)  # numeric safety
+            # Release exactly the cash still escrowed against this order:
+            # the telescoped remainder after all partial fills. No
+            # truncation guard is needed (or permitted -- it destroyed
+            # precision residue instead of conserving it).
+            refund = order.escrow_remaining
+            order.escrow_remaining = 0.0
             trader.cash_reserved -= refund
             trader.cash += refund
         else:
@@ -170,7 +194,9 @@ class OrderBook:
         order.active = False
         del self.orders[order_id]
         self._dead += 1
-        if self._dead > self.COMPACT_THRESHOLD:
+        if (self._dead >= self.COMPACT_MIN_DEAD
+                and self._dead >= self.COMPACT_RATIO
+                * (len(self._bids) + len(self._asks))):
             self._compact()
         return True
 
@@ -196,14 +222,17 @@ class OrderBook:
         Places a limit order; matches immediately while it crosses, then
         rests the remainder with funds/shares escrowed. Returns a list of
         (day, price, qty) execution tuples.
+
+        The top-of-book reference is cached across iterations of the
+        matching loop and re-polled only when the standing order is fully
+        consumed, avoiding a redundant best-level lookup per fill.
         """
         trades = []
 
         if order.side == 'BUY':
-            while order.quantity > 0:
-                best = self.best_ask()
-                if best is None or order.price < best.price:
-                    break
+            best = self.best_ask()
+            while (order.quantity > 0 and best is not None
+                    and order.price >= best.price):
                 trade_price = best.price            # Maker's price
                 trade_qty = min(order.quantity, best.quantity)
                 self.execute_trade(order.trader_id, best.trader_id,
@@ -215,12 +244,14 @@ class OrderBook:
                 best.quantity -= trade_qty
                 if best.quantity == 0:
                     self._retire_top('SELL', trader_map)
+                    best = self.best_ask()
 
             if order.quantity > 0:
                 buyer = trader_map[order.trader_id]
                 order.escrow_rate = self.commission_rate
                 escrow = order.price * order.quantity \
                     * (1.0 + order.escrow_rate)
+                order.escrow_remaining = escrow
                 buyer.cash -= escrow
                 buyer.cash_reserved += escrow
                 bisect.insort(self._bids, (self._bid_key(order), order))
@@ -228,10 +259,9 @@ class OrderBook:
                 buyer.active_orders.add(order.order_id)
 
         else:  # SELL
-            while order.quantity > 0:
-                best = self.best_bid()
-                if best is None or order.price > best.price:
-                    break
+            best = self.best_bid()
+            while (order.quantity > 0 and best is not None
+                    and order.price <= best.price):
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
                 self.execute_trade(best.trader_id, order.trader_id,
@@ -243,6 +273,7 @@ class OrderBook:
                 best.quantity -= trade_qty
                 if best.quantity == 0:
                     self._retire_top('BUY', trader_map)
+                    best = self.best_bid()
 
             if order.quantity > 0:
                 seller = trader_map[order.trader_id]
@@ -261,10 +292,8 @@ class OrderBook:
 
         if order.side == 'BUY':
             buyer = trader_map[order.trader_id]
-            while order.quantity > 0:
-                best = self.best_ask()
-                if best is None:
-                    break
+            best = self.best_ask()
+            while order.quantity > 0 and best is not None:
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
                 cost_per_share = trade_price * (1.0 + self.commission_rate)
@@ -281,12 +310,11 @@ class OrderBook:
                 best.quantity -= trade_qty
                 if best.quantity == 0:
                     self._retire_top('SELL', trader_map)
+                    best = self.best_ask()
 
         else:  # SELL
-            while order.quantity > 0:
-                best = self.best_bid()
-                if best is None:
-                    break
+            best = self.best_bid()
+            while order.quantity > 0 and best is not None:
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
                 self.execute_trade(best.trader_id, order.trader_id,
@@ -298,6 +326,7 @@ class OrderBook:
                 best.quantity -= trade_qty
                 if best.quantity == 0:
                     self._retire_top('BUY', trader_map)
+                    best = self.best_bid()
 
         return trades
 
@@ -309,9 +338,12 @@ class OrderBook:
         """
         Double-entry settlement: cash, shares, commissions, Tobin tax.
 
-        A maker-buyer settles out of escrow at the exact rate stored on the
-        resting order (`maker_order.escrow_rate`); takers pay the current
-        dynamic commission. Absolute conservation holds either way.
+        A maker-buyer settles out of the exact escrow tracked on the
+        resting order: each partial fill deducts its slice from
+        `escrow_remaining` and the final fill consumes exactly the
+        remainder, so the sum of all releases equals the amount escrowed at
+        placement bit-for-bit. Takers pay the current dynamic commission.
+        Absolute conservation holds either way.
         """
         buyer = trader_map[buyer_id]
         seller = trader_map[seller_id]
@@ -333,14 +365,22 @@ class OrderBook:
             remaining -= taxed_qty
 
         # Buyer side.
-        if buyer_is_maker:
+        if buyer_is_maker and maker_order is not None:
             # Cash was escrowed at the resting bid's price == trade price,
-            # at the commission rate frozen on the order at placement.
-            rate = maker_order.escrow_rate if maker_order is not None \
-                else BASE_COMMISSION_RATE
-            buyer.cash_reserved -= price * qty * (1.0 + rate)
+            # at the commission rate frozen on the order at placement. A
+            # fill that consumes the whole order releases exactly the
+            # remaining escrow (exact telescoping); partial fills release
+            # their proportional slice.
+            if qty == maker_order.quantity:
+                release = maker_order.escrow_remaining
+            else:
+                release = price * qty * (1.0 + maker_order.escrow_rate)
+            maker_order.escrow_remaining -= release
+            buyer.cash_reserved -= release
+            buyer_paid = release
         else:
-            buyer.cash -= trade_value * (1.0 + self.commission_rate)
+            buyer_paid = trade_value * (1.0 + self.commission_rate)
+            buyer.cash -= buyer_paid
         buyer.shares += qty
         buyer.shares_ledger.append((current_day, qty, price))
 
@@ -349,4 +389,9 @@ class OrderBook:
             seller.shares_reserved -= qty
         else:
             seller.shares -= qty
-        seller.cash += trade_value - seller_commission - tobin_tax
+        seller_proceeds = trade_value - seller_commission - tobin_tax
+        seller.cash += seller_proceeds
+
+        # Exact fee drain: what left the buyer minus what reached the
+        # seller is precisely the cash removed from the closed system.
+        self.total_fees_collected += buyer_paid - seller_proceeds

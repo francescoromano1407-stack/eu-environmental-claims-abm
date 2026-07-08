@@ -7,6 +7,10 @@ inventory-adaptive `MarketMaker` (tanh skew and asymmetric vol-scaled
 spreads of Part C), and the stateful `Manipulator` spoofing finite-state
 machine.
 
+Strategy dispatch is resolved once per strategy change: each trader holds
+a bound `_decision_handler` selected at construction / `switch_strategy`,
+so `decide_order` performs zero string comparisons in the hot loop.
+
 Circular-dependency note: agents construct `LimitOrder`/`MarketOrder`
 instances (runtime import from `models`) but only *reference* the book,
 which is injected into every method that needs it. `OrderBook` is
@@ -42,6 +46,17 @@ class Trader:
     # damping momentum churn on microscopic signals.
     CHARTIST_DEADZONE = 0.002
 
+    # Pre-computed Gaussian ogive denominator constant (erf corridor).
+    SQRT_2 = math.sqrt(2.0)
+
+    # Strategy -> handler-method name; resolved to a bound method once per
+    # strategy change (O(1) dynamic dispatch, no if/elif chain per call).
+    _HANDLER_NAMES = {
+        'noise': '_decide_noise',
+        'fundamentalist': '_decide_fundamentalist',
+        'chartist': '_decide_chartist',
+    }
+
     def __init__(self, trader_id: str, cash: float, shares: int,
                  trader_type: str, current_day: int = 0):
         self.trader_id = trader_id            # Immutable canonical id (map key)
@@ -50,6 +65,7 @@ class Trader:
         self.shares = int(shares)
         self.shares_reserved = 0              # Shares escrowed in resting asks
         self.type = trader_type
+        self._bind_decision_handler()
         # Every strategy change is recorded so logs reflect the trader's
         # *current* behaviour without mutating the dict key that resting
         # orders in the book still reference.
@@ -69,6 +85,11 @@ class Trader:
         """Log-friendly id whose prefix always reflects the current strategy."""
         return f"{self.trader_id}[{self.type}]"
 
+    def _bind_decision_handler(self) -> None:
+        """Resolves the current strategy to a bound decision method."""
+        name = self._HANDLER_NAMES.get(self.type)
+        self._decision_handler = getattr(self, name) if name else None
+
     def switch_strategy(self, new_type: str, day: int,
                         order_book: "OrderBook", trader_map: dict) -> None:
         """
@@ -80,6 +101,7 @@ class Trader:
         for oid in list(self.active_orders):
             order_book.cancel_order(oid, trader_map)
         self.type = new_type
+        self._bind_decision_handler()
         self.strategy_history.append((day, new_type))
 
     # -- accounting -------------------------------------------------------- #
@@ -108,18 +130,16 @@ class Trader:
         `rel_volatility` is the realised relative volatility of recent
         closes, which stretches the fundamentalist corridor (Part B).
         """
-        if self.type == 'noise':
-            return self._decide_noise(current_price, book_imbalance)
-        if self.type == 'fundamentalist':
-            return self._decide_fundamentalist(current_price, v_fundamental,
-                                               rel_volatility)
-        if self.type == 'chartist':
-            return self._decide_chartist(current_price, ema_fast, ema_slow,
-                                         ema_ready, book_imbalance)
-        return None
+        handler = self._decision_handler
+        if handler is None:
+            return None
+        return handler(current_price, v_fundamental, ema_fast, ema_slow,
+                       ema_ready, book_imbalance, rel_volatility)
 
-    def _decide_noise(self, current_price: float,
-                      imbalance: float) -> Optional[tuple]:
+    def _decide_noise(self, current_price: float, v_fundamental: float,
+                      ema_fast: float, ema_slow: float, ema_ready: bool,
+                      imbalance: float,
+                      rel_volatility: float) -> Optional[tuple]:
         """Random trader, mildly herding on visible book pressure."""
         buy_p = 0.25 + 0.15 * imbalance
         sell_p = 0.25 - 0.15 * imbalance
@@ -138,7 +158,9 @@ class Trader:
         return ('LIMIT', action, max(0.01, round(price, 2)), qty)
 
     def _decide_fundamentalist(self, current_price: float,
-                               v_fundamental: float,
+                               v_fundamental: float, ema_fast: float,
+                               ema_slow: float, ema_ready: bool,
+                               imbalance: float,
                                rel_volatility: float) -> Optional[tuple]:
         """
         Part B, fix 2: elastic probabilistic corridor.
@@ -158,7 +180,7 @@ class Trader:
         band = min(self.FUND_BAND_MAX,
                    self.FUND_BAND_BASE
                    + self.FUND_BAND_VOL_SCALE * rel_volatility)
-        conviction = math.erf(abs(mispricing) / (band * math.sqrt(2.0)))
+        conviction = math.erf(abs(mispricing) / (band * self.SQRT_2))
         if random.random() >= conviction:
             return None
 
@@ -182,9 +204,10 @@ class Trader:
                     current_price * (1.0 - 0.5 * band))
         return ('LIMIT', 'SELL', max(0.01, round(limit, 2)), qty)
 
-    def _decide_chartist(self, current_price: float, ema_fast: float,
-                         ema_slow: float, ema_ready: bool,
-                         imbalance: float) -> Optional[tuple]:
+    def _decide_chartist(self, current_price: float, v_fundamental: float,
+                         ema_fast: float, ema_slow: float, ema_ready: bool,
+                         imbalance: float,
+                         rel_volatility: float) -> Optional[tuple]:
         """
         EMA-crossover momentum trader (EMAs arrive precomputed in O(1)).
         A small imbalance tilt keeps chartists susceptible to spoofed depth;
@@ -244,6 +267,12 @@ class MarketMaker(Trader):
     stress (never to zero while solvent), and `provide_structural_depth`
     posts temporary backstop layers whenever near-mid depth is thin --
     e.g. right after an evolutionary review mass-cancels resting orders.
+
+    Inertial quoting: re-quoting is skipped entirely when the freshly
+    computed ladder is quantization-identical (cent-rounded prices,
+    integer sizes) to the one already resting and none of it has been
+    filled or decayed. Static regimes therefore stop flooding the book
+    with cancel/repost tombstone churn.
     """
 
     def __init__(self, trader_id: str, cash: float, shares: int,
@@ -270,6 +299,11 @@ class MarketMaker(Trader):
         self.backstop_min_depth = backstop_min_depth \
             if backstop_min_depth is not None else level_qty * 2
         self.initial_wealth = cash + shares * 100.0
+        # Inertial-quoting state: the last posted ladder plus the resting
+        # order count/volume observed right after posting it.
+        self._last_quote_ladder: Optional[tuple] = None
+        self._last_quote_count = -1
+        self._last_quote_resting_qty = -1
 
     # -- risk state ----------------------------------------------------------#
     def _inventory_stress(self) -> float:
@@ -296,15 +330,13 @@ class MarketMaker(Trader):
             LimitOrder(oid, self.trader_id, side, price, qty, current_day),
             trader_map, current_day)
 
-    # -- quoting -------------------------------------------------------------#
-    def place_quotes(self, mid: float, rel_volatility: float,
-                     order_book: "OrderBook", trader_map: dict,
-                     current_day: int) -> None:
-        """Cancels stale quotes, recomputes skew/spread, re-quotes the ladder."""
-        # Refresh: cancel our own resting quotes before re-quoting.
-        for oid in list(self.active_orders):
-            order_book.cancel_order(oid, trader_map)
-
+    def _compute_ladder(self, mid: float, rel_volatility: float) -> tuple:
+        """
+        Deterministically derives the quote ladder for the current state:
+        a tuple of (side, price, qty) triples. Pure function of (mid,
+        rel_volatility, inventory stress) -- used both for posting and for
+        the inertial identical-ladder skip.
+        """
         stress = self._inventory_stress()
         s = abs(stress)
 
@@ -333,18 +365,57 @@ class MarketMaker(Trader):
             bid_half = ask_half = half
             bid_scale = ask_scale = 1.0
 
+        ladder = []
         for i in range(self.num_levels):
             step = mid * self.level_step * i
             bid_price = max(0.01, round(reservation - bid_half - step, 2))
             ask_price = round(reservation + ask_half + step, 2)
             ask_price = max(ask_price, bid_price + 0.01)
+            ladder.append(('BUY', bid_price,
+                           max(1, int(self.level_qty * bid_scale))))
+            ladder.append(('SELL', ask_price,
+                           max(1, int(self.level_qty * ask_scale))))
+        return tuple(ladder)
 
-            self._place_own_limit(
-                'BUY', bid_price, max(1, int(self.level_qty * bid_scale)),
-                order_book, trader_map, current_day)
-            self._place_own_limit(
-                'SELL', ask_price, max(1, int(self.level_qty * ask_scale)),
-                order_book, trader_map, current_day)
+    def _resting_quote_qty(self, order_book: "OrderBook") -> int:
+        """Total unfilled volume across the MM's own resting orders."""
+        orders = order_book.orders
+        total = 0
+        for oid in self.active_orders:
+            order = orders.get(oid)
+            if order is not None:
+                total += order.quantity
+        return total
+
+    # -- quoting -------------------------------------------------------------#
+    def place_quotes(self, mid: float, rel_volatility: float,
+                     order_book: "OrderBook", trader_map: dict,
+                     current_day: int) -> None:
+        """Cancels stale quotes, recomputes skew/spread, re-quotes the ladder."""
+        ladder = self._compute_ladder(mid, rel_volatility)
+
+        # Inertial tolerance: if the state-derived ladder is identical to
+        # the one already resting (mid/stress/vol moved less than the cent
+        # and integer-size quantization) and nothing has been filled or
+        # decayed since it was posted, keep the existing quotes -- no
+        # mass-cancellation, no tombstone churn, and time priority is kept.
+        if (ladder == self._last_quote_ladder
+                and len(self.active_orders) == self._last_quote_count
+                and self._resting_quote_qty(order_book)
+                == self._last_quote_resting_qty):
+            return
+
+        # Refresh: cancel our own resting quotes before re-quoting.
+        for oid in list(self.active_orders):
+            order_book.cancel_order(oid, trader_map)
+
+        for side, price, qty in ladder:
+            self._place_own_limit(side, price, qty, order_book, trader_map,
+                                  current_day)
+
+        self._last_quote_ladder = ladder
+        self._last_quote_count = len(self.active_orders)
+        self._last_quote_resting_qty = self._resting_quote_qty(order_book)
 
     def provide_structural_depth(self, mid: float, order_book: "OrderBook",
                                  trader_map: dict, current_day: int,
@@ -356,13 +427,22 @@ class MarketMaker(Trader):
         posts wide temporary layers so a single market order cannot gap the
         price through an empty book. These quotes live only until the next
         `place_quotes` refresh cancels and replaces them.
+
+        Local solvency is checked *before* any depth scan: a side on which
+        the MM could not post even one share never touches the LOB.
         """
-        if order_book.depth_within('BUY', mid, band) < self.backstop_min_depth:
+        # Cheapest possible backstop bid: the deepest layer (largest
+        # offset). If even one share there is unaffordable, skip the scan.
+        lowest_bid = max(0.01, round(mid * (1.0 - 0.03), 2))
+        can_bid = self.cash >= lowest_bid * (1.0 + order_book.commission_rate)
+        if can_bid and order_book.depth_within(
+                'BUY', mid, band) < self.backstop_min_depth:
             for offset in (0.015, 0.03):
                 price = max(0.01, round(mid * (1.0 - offset), 2))
                 self._place_own_limit('BUY', price, self.backstop_qty,
                                       order_book, trader_map, current_day)
-        if order_book.depth_within('SELL', mid, band) < self.backstop_min_depth:
+        if self.shares > 0 and order_book.depth_within(
+                'SELL', mid, band) < self.backstop_min_depth:
             for offset in (0.015, 0.03):
                 price = round(mid * (1.0 + offset), 2)
                 self._place_own_limit('SELL', price, self.backstop_qty,
@@ -436,6 +516,13 @@ class Manipulator(Trader):
 
     def _try_start_spoof(self, mid: float, order_book: "OrderBook",
                          trader_map: dict, current_day: int) -> None:
+        # Local economic state first: if neither side of a spoof cycle is
+        # fundable, stand down before paying for any LOB depth scan.
+        can_spoof_buy = self.cash > mid * self.spoof_size
+        can_spoof_sell = self.total_shares >= self.attack_size
+        if not can_spoof_buy and not can_spoof_sell:
+            return
+
         # Read imbalance excluding our own resting orders.
         imbalance = order_book.get_imbalance(mid, exclude_trader=self.trader_id)
 
@@ -443,9 +530,9 @@ class Manipulator(Trader):
         # plant a big BID (fake buy pressure) when we intend to sell into the
         # induced rally, and vice-versa. Bias toward whichever side we can
         # actually monetise given current holdings.
-        if imbalance <= 0.1 and self.cash > mid * self.spoof_size:
+        if imbalance <= 0.1 and can_spoof_buy:
             self.spoof_side = 'BUY'          # fake buying pressure -> price up
-        elif imbalance >= -0.1 and self.total_shares >= self.attack_size:
+        elif imbalance >= -0.1 and can_spoof_sell:
             self.spoof_side = 'SELL'         # fake selling pressure -> price down
         else:
             return
