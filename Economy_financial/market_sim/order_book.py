@@ -24,9 +24,10 @@ from market_sim.constants import (
     TOBIN_HOLDING_DAYS,
     TOBIN_TAX_RATE,
 )
+from market_sim.models import MarketOrder
 
 if TYPE_CHECKING:
-    from market_sim.models import LimitOrder, MarketOrder
+    from market_sim.models import LimitOrder
 
 
 class OrderBook:
@@ -80,6 +81,11 @@ class OrderBook:
         self.commission_rate = BASE_COMMISSION_RATE
         self.tobin_rate = TOBIN_TAX_RATE
         self.total_fees_collected = 0.0           # Exact fee/tax drain audit
+        # Optional clearing-house hook (Part E). Duck-typed one-way slot:
+        # the book never imports the credit module; when set, every
+        # settlement notifies it in O(1) so leveraged positions can be
+        # margin-checked on each mark move. None => zero overhead.
+        self.clearing_house = None
 
     # -- friction ------------------------------------------------------------#
     def set_friction(self, commission_rate: float, tobin_rate: float) -> None:
@@ -330,6 +336,29 @@ class OrderBook:
 
         return trades
 
+    # -- clearing house (Part E): forced liquidation ---------------------------#
+    def force_liquidation(self, trader_id: str, qty: int, trader_map: dict,
+                          current_day: int) -> float:
+        """
+        Forced Liquidation State (clearing-house rule):
+          1. instantly cancels ALL of the trader's resting limit orders
+             (refunding their escrow into free cash as always), then
+          2. dumps `qty` shares into the active bids with an automated
+             market order.
+        Returns the exact net cash proceeds of the dump (sale revenue
+        after commission/Tobin tax), measured as the trader's cash delta,
+        so the caller can hard-route it into the outstanding liability.
+        """
+        trader = trader_map[trader_id]
+        for oid in list(trader.active_orders):
+            self.cancel_order(oid, trader_map)
+        cash_before = trader.cash
+        qty = min(qty, trader.shares)
+        if qty > 0:
+            self.execute_market_order(
+                MarketOrder(trader_id, 'SELL', qty), trader_map, current_day)
+        return trader.cash - cash_before
+
     # -- settlement ----------------------------------------------------------#
     def execute_trade(self, buyer_id: str, seller_id: str, price: float,
                       qty: int, current_day: int, trader_map: dict,
@@ -395,3 +424,10 @@ class OrderBook:
         # Exact fee drain: what left the buyer minus what reached the
         # seller is precisely the cash removed from the closed system.
         self.total_fees_collected += buyer_paid - seller_proceeds
+
+        # Part E: notify the clearing house that the mark moved (O(1)
+        # flag set -- margin sweeps run from the simulation loop, never
+        # re-entrantly inside matching).
+        clearing_house = self.clearing_house
+        if clearing_house is not None:
+            clearing_house.notify_trade(price)

@@ -25,6 +25,12 @@ import math
 import random
 from typing import TYPE_CHECKING, Optional
 
+from market_sim.constants import (
+    GREEN_SENTIMENT_EVENT_BOOST,
+    GREEN_SENTIMENT_WINDOW_DAYS,
+    GREENIUM_GAMMA,
+    STATE_GREEN_THRESHOLD,
+)
 from market_sim.models import LimitOrder, MarketOrder
 
 if TYPE_CHECKING:
@@ -48,6 +54,9 @@ class Trader:
 
     # Pre-computed Gaussian ogive denominator constant (erf corridor).
     SQRT_2 = math.sqrt(2.0)
+
+    # Part F: market-wide sustainable conviction (greenium sensitivity).
+    GREENIUM_GAMMA = GREENIUM_GAMMA
 
     # Strategy -> handler-method name; resolved to a bound method once per
     # strategy change (O(1) dynamic dispatch, no if/elif chain per call).
@@ -79,6 +88,16 @@ class Trader:
 
         self.active_orders: set[int] = set()  # Resting order ids in the book
 
+        # -- credit state (Part E) -- all zero (and provably inert) unless
+        # the Simulation is constructed with enable_credit=True.
+        self.shares_collateral = 0   # Shares pledged against credit lines
+        self.debt = 0.0              # Float mirror of total outstanding debt
+        self.cash_lent = 0.0         # P2P receivables owed to this trader
+
+        # -- multi-asset state (Part F) -- None in single-asset mode; a
+        # {symbol: AssetPosition} dict when the ESG ecosystem is active.
+        self.positions = None
+
     # -- identity ---------------------------------------------------------- #
     @property
     def label(self) -> str:
@@ -94,12 +113,18 @@ class Trader:
                         order_book: "OrderBook", trader_map: dict) -> None:
         """
         Switches strategy, records it, and cancels all open orders (they
-        were priced under the old strategy's logic).
+        were priced under the old strategy's logic). In multi-asset mode
+        the cancellation sweeps every venue through the position views.
         """
         if new_type == self.type:
             return
-        for oid in list(self.active_orders):
-            order_book.cancel_order(oid, trader_map)
+        if self.positions is not None:
+            for pos in self.positions.values():
+                for oid in list(pos.active_orders):
+                    pos.book.cancel_order(oid, pos.book_map)
+        else:
+            for oid in list(self.active_orders):
+                order_book.cancel_order(oid, trader_map)
         self.type = new_type
         self._bind_decision_handler()
         self.strategy_history.append((day, new_type))
@@ -111,17 +136,47 @@ class Trader:
 
     @property
     def total_shares(self) -> int:
-        return self.shares + self.shares_reserved
+        return self.shares + self.shares_reserved + self.shares_collateral
 
     def get_wealth(self, current_price: float) -> float:
-        """Mark-to-market wealth: all cash plus all shares at current price."""
-        return self.total_cash + self.total_shares * current_price
+        """
+        Mark-to-market gross asset value: all cash (free + escrowed), all
+        shares (free + escrowed + pledged as collateral), and any P2P
+        lending receivables. Liabilities are NOT netted here -- see
+        `get_equity` for wealth net of debt. With the credit system off,
+        the extra terms are exactly zero and this is bit-identical to the
+        pre-credit definition.
+        """
+        return (self.total_cash + self.total_shares * current_price
+                + self.cash_lent)
+
+    # -- leverage (Part E): assess and update credit conditions ------------- #
+    def get_equity(self, current_price: float) -> float:
+        """Mark-to-market equity: gross wealth minus outstanding debt."""
+        return self.get_wealth(current_price) - self.debt
+
+    def debt_to_equity(self, current_price: float) -> float:
+        """Leverage ratio for the macroprudential cap; inf if insolvent."""
+        equity = self.get_equity(current_price)
+        if equity <= 0.0:
+            return math.inf
+        return self.debt / equity
+
+    def pledge_collateral(self, qty: int) -> None:
+        """Locks free shares as credit collateral (escrow-style move)."""
+        self.shares -= qty
+        self.shares_collateral += qty
+
+    def release_collateral(self, qty: int) -> None:
+        """Returns pledged shares to the freely tradable pool."""
+        self.shares_collateral -= qty
+        self.shares += qty
 
     # -- decision logic ---------------------------------------------------- #
     def decide_order(self, current_price: float, v_fundamental: float,
                      ema_fast: float, ema_slow: float, ema_ready: bool,
-                     book_imbalance: float,
-                     rel_volatility: float) -> Optional[tuple]:
+                     book_imbalance: float, rel_volatility: float,
+                     green_score: float = 0.0) -> Optional[tuple]:
         """
         Returns (order_type, side, price, quantity) or None.
 
@@ -129,17 +184,21 @@ class Trader:
         (the surface the Manipulator's spoof orders exploit).
         `rel_volatility` is the realised relative volatility of recent
         closes, which stretches the fundamentalist corridor (Part B).
+        `green_score` (Part F) is the asset's sustainability score; the
+        default 0.0 makes the greenium a multiplication by exactly 1.0,
+        so single-asset behavior is bit-identical.
         """
         handler = self._decision_handler
         if handler is None:
             return None
         return handler(current_price, v_fundamental, ema_fast, ema_slow,
-                       ema_ready, book_imbalance, rel_volatility)
+                       ema_ready, book_imbalance, rel_volatility,
+                       green_score)
 
     def _decide_noise(self, current_price: float, v_fundamental: float,
                       ema_fast: float, ema_slow: float, ema_ready: bool,
-                      imbalance: float,
-                      rel_volatility: float) -> Optional[tuple]:
+                      imbalance: float, rel_volatility: float,
+                      green_score: float = 0.0) -> Optional[tuple]:
         """Random trader, mildly herding on visible book pressure."""
         buy_p = 0.25 + 0.15 * imbalance
         sell_p = 0.25 - 0.15 * imbalance
@@ -160,10 +219,19 @@ class Trader:
     def _decide_fundamentalist(self, current_price: float,
                                v_fundamental: float, ema_fast: float,
                                ema_slow: float, ema_ready: bool,
-                               imbalance: float,
-                               rel_volatility: float) -> Optional[tuple]:
+                               imbalance: float, rel_volatility: float,
+                               green_score: float = 0.0) -> Optional[tuple]:
         """
         Part B, fix 2: elastic probabilistic corridor.
+        Part F: greenium-adjusted fair value. The raw OU fundamental is
+        stretched by the market's sustainable conviction,
+
+            V_green_fair = V_fundamental * (1 + GREENIUM_GAMMA * score),
+
+        so fundamentalists accumulate green assets (which look structurally
+        undervalued at par) and distribute brown ones. For score == 0 the
+        multiplier is exactly 1.0 -- a bit-exact float identity -- and the
+        legacy valuation is untouched.
 
         The relative mispricing m = (V - P) / V is compared with a corridor
         half-width that breathes with realised volatility. The probability
@@ -175,8 +243,10 @@ class Trader:
         """
         if v_fundamental <= 0.0 or current_price <= 0.0:
             return None
+        v_green_fair = v_fundamental * (1.0 + self.GREENIUM_GAMMA
+                                        * green_score)
 
-        mispricing = (v_fundamental - current_price) / v_fundamental
+        mispricing = (v_green_fair - current_price) / v_green_fair
         band = min(self.FUND_BAND_MAX,
                    self.FUND_BAND_BASE
                    + self.FUND_BAND_VOL_SCALE * rel_volatility)
@@ -193,53 +263,49 @@ class Trader:
                 return ('MARKET', 'BUY', None, qty)
             # Passive target between the market and fair value; never chase
             # more than half a band above the current price in one order.
-            limit = min(v_fundamental * (1.0 - random.uniform(0.1, 0.5) * band),
+            limit = min(v_green_fair * (1.0 - random.uniform(0.1, 0.5) * band),
                         current_price * (1.0 + 0.5 * band))
             return ('LIMIT', 'BUY', max(0.01, round(limit, 2)), qty)
 
         # Overvalued -> distribute.
         if random.random() < p_market:
             return ('MARKET', 'SELL', None, qty)
-        limit = max(v_fundamental * (1.0 + random.uniform(0.1, 0.5) * band),
+        limit = max(v_green_fair * (1.0 + random.uniform(0.1, 0.5) * band),
                     current_price * (1.0 - 0.5 * band))
         return ('LIMIT', 'SELL', max(0.01, round(limit, 2)), qty)
 
-    def _decide_chartist(self, current_price: float, v_fundamental: float,
-                         ema_fast: float, ema_slow: float, ema_ready: bool,
-                         imbalance: float,
-                         rel_volatility: float) -> Optional[tuple]:
+    def _decide_chartist(self, current_price: float, v_fundamental: float, ema_fast: float, ema_slow: float, ema_ready: bool, imbalance: float, rel_volatility: float, green_score: float = 0.0) -> Optional[tuple]:
         """
-        EMA-crossover momentum trader (EMAs arrive precomputed in O(1)).
-        A small imbalance tilt keeps chartists susceptible to spoofed depth;
-        a dead zone suppresses churn on microscopic crossovers.
+        CONTRARIAN MEAN-REVERSION TRADER (Optimized)
+        Invece di inseguire il trend in ritardo, vende i picchi e compra i minimi.
+        Usa solo ordini limite passivi per incassare lo spread anziché pagarlo,
+        ed è immune allo spoofing dei manipolatori.
         """
         if not ema_ready:
-            # Warm-up: behave like a noise trader for the first 15 closes.
-            action = random.choice(['BUY', 'SELL', 'HOLD'])
-            if action == 'HOLD':
-                return None
-            qty = random.randint(1, 5)
-            price = current_price * (1.0 + random.normalvariate(0.0, 0.02))
-            return ('LIMIT', action, max(0.01, round(price, 2)), qty)
-
-        signal = (ema_fast - ema_slow) / ema_slow + 0.01 * imbalance
-        if abs(signal) < self.CHARTIST_DEADZONE:
+            # Warm-up: rimaniamo fermi a accumulare liquidità invece di fare noise trading costoso
             return None
-        qty = random.randint(1, 5)
-        if signal > 0.0:
-            if random.random() < 0.3:
-                return ('MARKET', 'BUY', None, qty)
-            price = current_price * (1.0 + random.uniform(0.005, 0.02))
-            return ('LIMIT', 'BUY', max(0.01, round(price, 2)), qty)
-        if random.random() < 0.3:
-            return ('MARKET', 'SELL', None, qty)
-        price = current_price * (1.0 - random.uniform(0.005, 0.02))
-        return ('LIMIT', 'SELL', max(0.01, round(price, 2)), qty)
 
-    def __repr__(self) -> str:
-        return (f"Trader(id={self.label}, cash={self.cash:.2f}, "
-                f"reserved_c={self.cash_reserved:.2f}, shares={self.shares}, "
-                f"reserved_s={self.shares_reserved})")
+        # 1. Pulizia del segnale: eliminiamo l'imbalance per diventare immuni ai Manipolatori
+        pure_trend = (ema_fast - ema_slow) / ema_slow
+
+        # Applichiamo la deadzone per evitare micro-operazioni inutili
+        if abs(pure_trend) < self.CHARTIST_DEADZONE:
+            return None
+
+        qty = random.randint(2, 6) # Leggermente più aggressivi sulla dimensione
+
+        # 2. Logica Contrarian (Invertiamo il trend)
+        # Se il prezzo è salito troppo velocemente (pure_trend > 0), shortiamo il picco!
+        if pure_trend > 0.0:
+            # Piazziamo un ordine limite PASSIVO sopra il mid per vendere al prezzo più alto possibile
+            price = current_price * (1.0 + random.uniform(0.001, 0.005))
+            return ('LIMIT', 'SELL', max(0.01, round(price, 2)), qty)
+
+        # Se il prezzo è sceso troppo velocemente (pure_trend < 0), compriamo il deep!
+        else:
+            # Piazziamo un ordine limite PASSIVO sotto il mid, aspettando che il mercato ci colpisca
+            price = current_price * (1.0 - random.uniform(0.001, 0.005))
+            return ('LIMIT', 'BUY', max(0.01, round(price, 2)), qty)
 
 
 # --------------------------------------------------------------------------- #
@@ -597,3 +663,130 @@ class Manipulator(Trader):
     def _clear_spoof_refs(self) -> None:
         self.spoof_order_id = None
         self.spoof_side = None
+
+
+# --------------------------------------------------------------------------- #
+# Part F: Green Manipulator (greenwashing momentum-ignition FSM)
+# --------------------------------------------------------------------------- #
+class GreenManipulator(Manipulator):
+    """
+    Multi-asset spoofer specialised in sustainable narrative cycles.
+
+    Target selection replaces the generic depth-imbalance read: in
+    STATE_IDLE the agent scores every listed asset's *green sentiment* --
+    its green score plus event boosts for a recent state subsidy or a
+    recent corporate transition step -- and attacks the hottest narrative
+    above the regulatory threshold. This covers both genuinely green
+    assets and "greenwashed" brown assets whose transition announcements
+    are freshly in the news.
+
+    The attack plants a massive fake BUY wall below the mid on the target
+    asset (manufacturing an artificial sustainable rally for the
+    imbalance-following noise/chartist crowd); once the induced move
+    clears the harvest threshold, the wall is pulled and an aggressive
+    market SELL dumps inventory into the manufactured demand, banking the
+    green premium before the cooldown.
+
+    Operates exclusively through per-asset `AssetPosition` views, so cash
+    stays in the shared wallet and each venue's book sees a normal
+    counterparty.
+    """
+
+    def __init__(self, trader_id: str, cash: float, shares: int,
+                 spoof_size: int = 400, spoof_offset: float = 0.03,
+                 attack_size: int = 40, cooldown: int = 6,
+                 patience: int = 3, current_day: int = 0):
+        super().__init__(trader_id, cash, shares, spoof_size=spoof_size,
+                         spoof_offset=spoof_offset, attack_size=attack_size,
+                         cooldown=cooldown, patience=patience,
+                         current_day=current_day)
+        self._target_venue = None      # Venue under attack while SPOOFING
+        self.green_spoofs = 0          # Ignitions launched (audit)
+        self.green_harvests = 0        # Successful premium harvests (audit)
+
+    @staticmethod
+    def green_sentiment(asset, current_day: int) -> float:
+        """Green score plus news boosts for recent subsidy/transition."""
+        sentiment = asset.green_score
+        if current_day - asset.last_subsidy_day \
+                <= GREEN_SENTIMENT_WINDOW_DAYS:
+            sentiment += GREEN_SENTIMENT_EVENT_BOOST
+        if current_day - asset.last_transition_day \
+                <= GREEN_SENTIMENT_WINDOW_DAYS:
+            sentiment += GREEN_SENTIMENT_EVENT_BOOST
+        return sentiment
+
+    def act_green(self, venues: list, current_day: int) -> None:
+        """Advances the greenwashing state machine by one trading day."""
+        if current_day < self.next_active_day:
+            return
+        if self.state == self.STATE_IDLE:
+            self._try_start_green_spoof(venues, current_day)
+        elif self.state == self.STATE_SPOOFING:
+            self._manage_green_spoof(current_day)
+
+    def _try_start_green_spoof(self, venues: list,
+                               current_day: int) -> None:
+        # Hottest green narrative above the regulatory threshold wins.
+        target, best = None, STATE_GREEN_THRESHOLD
+        for venue in venues:
+            sentiment = self.green_sentiment(venue.asset, current_day)
+            if sentiment >= best:
+                target, best = venue, sentiment
+        if target is None:
+            return
+
+        book = target.order_book
+        mid = book.get_midpoint(target.asset.get_last_price())
+        position = self.positions[target.symbol]
+        # Local economic state first (cash escrow for the wall, inventory
+        # for the later dump) -- no book scan happens before this gate.
+        if self.cash <= mid * self.spoof_size \
+                or position.shares < self.attack_size:
+            return
+
+        price = max(0.01, round(mid * (1.0 - self.spoof_offset), 2))
+        oid = book.get_next_order_id()
+        order = LimitOrder(oid, self.trader_id, 'BUY', price,
+                           self.spoof_size, current_day)
+        book.add_limit_order(order, target.trader_map, current_day)
+
+        if book.orders.get(oid) is not None and order.active:
+            self.spoof_order_id = oid
+            self.spoof_side = 'BUY'
+            self.state = self.STATE_SPOOFING
+            self.spoof_started_day = current_day
+            self.mid_at_spoof = mid
+            self._target_venue = target
+            self.green_spoofs += 1
+        else:
+            self._cancel_spoof(book, target.trader_map)
+
+    def _manage_green_spoof(self, current_day: int) -> None:
+        venue = self._target_venue
+        book = venue.order_book
+        if not self._spoof_order_alive(book):
+            self._reset_cycle(current_day)
+            return
+
+        mid = book.get_midpoint(venue.asset.get_last_price())
+        move = (mid - self.mid_at_spoof) / self.mid_at_spoof
+        elapsed = current_day - self.spoof_started_day
+
+        if move >= 0.004:      # The manufactured rally is harvestable.
+            self._cancel_spoof(book, venue.trader_map)
+            position = self.positions[venue.symbol]
+            qty = min(self.attack_size, position.shares)
+            if qty > 0:
+                book.execute_market_order(
+                    MarketOrder(self.trader_id, 'SELL', qty),
+                    venue.trader_map, current_day)
+                self.green_harvests += 1
+            self._reset_cycle(current_day)
+        elif elapsed >= self.patience:
+            self._cancel_spoof(book, venue.trader_map)
+            self._reset_cycle(current_day)
+
+    def _reset_cycle(self, current_day: int) -> None:
+        super()._reset_cycle(current_day)
+        self._target_venue = None
