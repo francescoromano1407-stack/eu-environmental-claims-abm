@@ -21,6 +21,7 @@ from typing import Optional
 from market_sim.constants import (
     BASE_COMMISSION_RATE,
     CORPORATE_BALANCE_FLOOR,
+    GREEN_CAPEX_FACTOR,
     LOG_CORPORATE_BALANCE_FLOOR,
 )
 
@@ -103,8 +104,20 @@ class Asset:
                  initial_balance: float = 300_000.0,
                  fundamental_drift: float = 0.00010,
                  fundamental_reversion: float = 0.015,
-                 fundamental_vol: float = 0.005):
+                 fundamental_vol: float = 0.005,
+                 green_score: float = 0.0):
         self.symbol = symbol
+        # Part F: sustainability profile in [0, 1] (0 = brown, 1 = green).
+        # Externally read-only; it moves only through the controlled
+        # `apply_green_transition` corporate mechanism.
+        self._green_score = min(1.0, max(0.0, float(green_score)))
+        self.last_subsidy_day = -10**9      # Set by the State layer.
+        self.last_transition_day = -10**9   # Set by apply_green_transition.
+        # Historical capital penalty: pre-listing sustainable CAPEX
+        # structurally reduces the opening balance sheet. Exactly neutral
+        # for green_score == 0 (multiplier 1.0 is an exact float identity).
+        initial_balance = initial_balance \
+            * (1.0 - GREEN_CAPEX_FACTOR * self._green_score)
         self.price_history: collections.deque = collections.deque(
             [initial_price], maxlen=HISTORY_MAXLEN)
         self.balance_history: collections.deque = collections.deque(
@@ -115,6 +128,23 @@ class Asset:
         self._log_floor = LOG_CORPORATE_BALANCE_FLOOR
         self.balance = initial_balance    # Property setter seeds _log_balance
         self._log_anchor = self._log_balance
+
+    @property
+    def green_score(self) -> float:
+        """Sustainability score in [0, 1]; mutate via apply_green_transition."""
+        return self._green_score
+
+    def apply_green_transition(self, increment: float, cost: float,
+                               current_day: int) -> None:
+        """
+        Executes one corporate Green Transition Step: pays `cost` out of
+        the balance sheet (the property setter keeps the log-space OU
+        state in sync) and permanently raises the green score. The caller
+        is responsible for the solvency-floor check.
+        """
+        self.balance -= cost
+        self._green_score = min(1.0, self._green_score + increment)
+        self.last_transition_day = current_day
 
     # `balance` is a property so external mutations (dividend payouts) keep
     # the log-space OU state consistent without any log() in the daily loop.
@@ -153,6 +183,113 @@ class Asset:
     def get_last_price(self) -> float:
         """Returns the most recent closing price."""
         return self.price_history[-1]
+
+
+class AssetPosition:
+    """
+    Per-(holder, asset) ledger view for the multi-asset ecosystem (Part F).
+
+    Presents exactly the surface the OrderBook mutates during matching and
+    settlement -- `shares`, `shares_reserved`, `shares_ledger`,
+    `active_orders`, `cash`, `cash_reserved` -- holding the share-side
+    state per asset while delegating every cash field to the owner's
+    single shared wallet. Each asset's book therefore operates on these
+    views through its own trader_map and the matching engine stays
+    byte-identical, while cash conservation holds across the whole
+    portfolio automatically.
+
+    Credit-facing surface (`debt`, `cash_lent`, `get_equity`,
+    `pledge_collateral`) is also exposed so the existing CreditMarket can
+    margin-lend against the primary listing without modification.
+    """
+
+    __slots__ = ("owner", "book", "book_map", "shares", "shares_reserved",
+                 "shares_collateral", "shares_ledger", "active_orders")
+
+    def __init__(self, owner, shares: int = 0, current_day: int = 0):
+        self.owner = owner
+        self.book = None            # Bound by the venue after construction
+        self.book_map = None        # The venue's trader_map (for cancels)
+        self.shares = int(shares)
+        self.shares_reserved = 0
+        self.shares_collateral = 0
+        self.shares_ledger: collections.deque = collections.deque()
+        if self.shares > 0:
+            self.shares_ledger.append((current_day, self.shares, 100.0))
+        self.active_orders: set[int] = set()
+
+    # -- cash surface: pure delegation to the owner's shared wallet -------- #
+    @property
+    def cash(self) -> float:
+        return self.owner.cash
+
+    @cash.setter
+    def cash(self, value: float) -> None:
+        self.owner.cash = value
+
+    @property
+    def cash_reserved(self) -> float:
+        return self.owner.cash_reserved
+
+    @cash_reserved.setter
+    def cash_reserved(self, value: float) -> None:
+        self.owner.cash_reserved = value
+
+    @property
+    def cash_lent(self) -> float:
+        return self.owner.cash_lent
+
+    @cash_lent.setter
+    def cash_lent(self, value: float) -> None:
+        self.owner.cash_lent = value
+
+    @property
+    def debt(self) -> float:
+        return self.owner.debt
+
+    @debt.setter
+    def debt(self, value: float) -> None:
+        self.owner.debt = value
+
+    # -- identity delegation ------------------------------------------------ #
+    @property
+    def trader_id(self) -> str:
+        return self.owner.trader_id
+
+    @property
+    def type(self) -> str:
+        return self.owner.type
+
+    # -- accounting ---------------------------------------------------------- #
+    @property
+    def total_cash(self) -> float:
+        return self.owner.cash + self.owner.cash_reserved
+
+    @property
+    def total_shares(self) -> int:
+        return self.shares + self.shares_reserved + self.shares_collateral
+
+    def get_wealth(self, current_price: float) -> float:
+        """Owner cash + receivables + THIS position marked at `price`."""
+        return (self.total_cash + self.owner.cash_lent
+                + self.total_shares * current_price)
+
+    def get_equity(self, current_price: float) -> float:
+        """Conservative equity: this position + wallet, net of all debt."""
+        return self.get_wealth(current_price) - self.owner.debt
+
+    def pledge_collateral(self, qty: int) -> None:
+        self.shares -= qty
+        self.shares_collateral += qty
+
+    def release_collateral(self, qty: int) -> None:
+        self.shares_collateral -= qty
+        self.shares += qty
+
+    def __repr__(self) -> str:
+        return (f"AssetPosition(owner={self.owner.trader_id}, "
+                f"shares={self.shares}, reserved={self.shares_reserved}, "
+                f"collateral={self.shares_collateral})")
 
 
 class IncrementalEMA:

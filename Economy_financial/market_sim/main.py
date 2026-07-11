@@ -26,16 +26,19 @@ DEFAULT_SEED = 42
 
 
 def main(seed: int = DEFAULT_SEED) -> Simulation:
-    """Runs the canonical simulation and emits the CSV + dashboard."""
+    """Runs the simulation with both Credit and ESG macro-frameworks enabled."""
     random.seed(seed)
+    
     sim = Simulation(num_traders=100, initial_cash=10_000.0,
                      initial_shares=100, initial_price=100.0,
-                     rf_rate=0.03, days=2000, num_manipulators=2)
-    sim.run()
+                     rf_rate=0.03, days=2000, num_manipulators=2,
+                     enable_credit=True,
+                     enable_esg=True) # <--- ATTIVALO QUI
+                     
+    sim.run() 
     export_simulation_metrics(sim, "simulation_results.csv")
     sim.plot_dashboard("market_simulation_dashboard.png")
     return sim
-
 
 if __name__ == '__main__':
     main()
