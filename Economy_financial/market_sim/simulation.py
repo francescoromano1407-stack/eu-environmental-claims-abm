@@ -35,27 +35,39 @@ import math
 import random
 from typing import Optional
 
+from decimal import Decimal
+
 from market_sim.constants import (
     BASE_DIVIDEND_PER_SHARE,
     COMMISSION_RATE_SPAN,
     CORPORATE_BALANCE_FLOOR,
+    CORPORATE_TREASURY_SHARES,
+    CREDIBILITY_PRIOR,
+    DIRICHLET_CONCENTRATION,
     EVOLUTION_EPOCH_DAYS,
-    GREEN_TRANSITION_COST,
-    GREEN_TRANSITION_SAFETY,
-    GREEN_TRANSITION_STEP,
     INTENSITY_OF_CHOICE,
     LAMBDA_MEMORY,
+    LAMBDA_TRUST,
     MAX_SWITCH_FRACTION,
     MIN_COMMISSION_RATE,
     MIN_TOBIN_RATE,
     ORDER_DECAY_AGE_SCALE,
     ORDER_DECAY_BASE_HAZARD,
     ORDER_DECAY_MAX_HAZARD,
+    REG_REPORTING_PERIOD_DAYS,
+    SCANDAL_CREDIBILITY_SHOCK,
+    SCANDAL_SECTOR_SPILLOVER,
+    SOPHISTICATED_FRACTION,
+    STATE_DAILY_INVESTMENT,
+    STATE_GREEN_THRESHOLD,
+    STATE_SUBSIDY_EPOCH_BUDGET_DEC,
     STATE_TREASURY,
     STRATEGY_MEMORY,
     SWITCH_CONSIDERATION_RATE,
     TOBIN_RATE_SPAN,
+    WEIGHT_ADAPTATION_STEP,
 )
+from market_sim.corporates import CorporatePolicy, GreenCapitalPrice
 from market_sim.credit_market import CentralBank, CommercialBank, CreditMarket
 from market_sim.models import (
     Asset,
@@ -65,6 +77,7 @@ from market_sim.models import (
     MarketOrder,
 )
 from market_sim.order_book import OrderBook
+from market_sim.regulation import ESGRegulation
 from market_sim.state_intervention import STATE_ID, State
 from market_sim.traders import (
     GreenManipulator,
@@ -73,13 +86,18 @@ from market_sim.traders import (
     Trader,
 )
 
-# Default listing profiles for the ESG multi-asset ecosystem (Part F):
-# ten firms spanning the brown -> green spectrum, (symbol, green_score).
+# Default listing profiles for the ESG multi-asset ecosystem (Part F /
+# Part G): ten firms spanning the brown -> green spectrum. Entries are
+# (symbol, green_score[, corporate_strategy[, firm_size]]); 2-tuples stay
+# valid (strategy defaults to 'honest', firm size to the balance proxy).
 # Overridable via Simulation(asset_profiles=...).
 DEFAULT_ESG_PROFILES = (
-    ("BRN1", 0.05), ("BRN2", 0.15), ("BRN3", 0.25),
-    ("MID1", 0.35), ("MID2", 0.45), ("MID3", 0.55), ("MID4", 0.65),
-    ("GRN1", 0.75), ("GRN2", 0.85), ("GRN3", 0.95),
+    ("BRN1", 0.05, "greenwasher"), ("BRN2", 0.15, "adaptive"),
+    ("BRN3", 0.25, "honest"),
+    ("MID1", 0.35, "greenwasher"), ("MID2", 0.45, "honest"),
+    ("MID3", 0.55, "adaptive"), ("MID4", 0.65, "honest"),
+    ("GRN1", 0.75, "honest"), ("GRN2", 0.85, "greenwasher"),
+    ("GRN3", 0.95, "honest"),
 )
 
 
@@ -94,7 +112,11 @@ class MarketVenue:
     __slots__ = ("symbol", "asset", "order_book", "market_maker",
                  "ema_fast", "ema_slow", "recent_closes", "recent_volumes",
                  "volume_baseline", "trader_map", "shares_outstanding",
-                 "log_price", "log_balance", "log_green_score")
+                 "log_price", "log_balance", "log_green_score",
+                 # Part G: corporate policy agent and disclosed/true series
+                 # (log_green_score keeps logging the DISCLOSED score --
+                 # the legacy alias -- so downstream tooling stays valid).
+                 "policy", "log_true_score")
 
     def __init__(self, symbol: str, initial_price: float):
         self.symbol = symbol
@@ -113,6 +135,8 @@ class MarketVenue:
         self.shares_outstanding = 0
         self.log_price: list[float] = []
         self.log_balance: list[float] = []
+        self.policy: Optional[CorporatePolicy] = None   # Part G, WP2/WP5
+        self.log_true_score: list[float] = []
 
 
 class Simulation:
@@ -125,7 +149,28 @@ class Simulation:
                  rf_rate: float = 0.02, days: int = 1000,
                  num_manipulators: int = 2, enable_credit: bool = True,
                  enable_esg: bool = False,
-                 asset_profiles: Optional[list] = None):
+                 asset_profiles: Optional[list] = None,
+                 enable_regulation: bool = False,
+                 regulation: Optional[ESGRegulation] = None,
+                 mixture_init: str = 'dirichlet'):
+        """
+        Part G flags (all inert unless enable_esg=True, preserving the
+        seed-42 legacy trajectory bit-for-bit):
+
+        enable_regulation  Activates the WP1 Directive (EU) 2026/470
+                           layer: disclosure wedge + audits + penalties,
+                           credibility beliefs (WP3), green bonds (WP6),
+                           and green-weighted reserves (WP7). Off =>
+                           disclosed scores track true scores exactly.
+        regulation         Optional pre-built ESGRegulation to inject
+                           (policy experiments override its fields);
+                           ignored unless enable_regulation.
+        mixture_init       WP4 strategy mixtures: 'dirichlet' (default;
+                           initial weights ~ Dirichlet via gammavariate),
+                           'vertex' (mixture dispatch on, but exact
+                           legacy vertex populations -- regression runs),
+                           'off' (pre-Part-G pure-type dispatch).
+        """
         self.days = days
         self.rf_rate = rf_rate
         self.initial_cash = initial_cash
@@ -144,6 +189,16 @@ class Simulation:
         self.total_subsidies_paid = 0.0
         self.green_transitions = 0
         self._multi_asset = bool(enable_esg or asset_profiles is not None)
+
+        # Part G defaults (all None/off => provably inert; the attributes
+        # exist on every Simulation so gated call sites stay branch-only).
+        self.esg_regulation: Optional[ESGRegulation] = None
+        self.green_capital: Optional[GreenCapitalPrice] = None
+        self._mixtures_active = False
+        self._mixture_init = mixture_init
+        self._enable_regulation = bool(enable_regulation and enable_esg)
+        self._injected_regulation = regulation
+        self.total_treasury_sweeps = 0.0     # Conservation audit accumulator
 
         # Structural invariant: total float across ALL holders. Updated
         # only at trader creation/removal (bankruptcy reseeding) -- trades,
@@ -252,7 +307,7 @@ class Simulation:
         # Part F policy-rate series (all-zero without a central bank).
         self.log_policy_rate: list[float] = []
 
-    # -- Part F: multi-asset ecosystem construction --------------------------- #
+    # -- Part F/G: multi-asset ecosystem construction -------------------------- #
     def _init_multi_asset(self, profiles: list, num_traders: int,
                           num_manipulators: int, enable_credit: bool,
                           enable_esg: bool) -> None:
@@ -260,12 +315,37 @@ class Simulation:
         Builds the ESG multi-asset ecosystem: one MarketVenue per listing
         (own OrderBook + MarketMaker + regime state), shared-wallet
         participants holding per-venue AssetPosition views, the State
-        fiscal entity, the CentralBank, and the credit layer bound to the
-        primary listing (venue 0).
+        fiscal entity, the CentralBank, the credit layer bound to the
+        primary listing (venue 0), and -- Part G -- the ESGRegulation
+        policy object, one CorporatePolicy agent per listing (with its
+        treasury ledger shell), the stochastic price of green capital,
+        and the WP4 strategy-mixture population.
         """
+        # Part G wiring happens FIRST so trader construction below can
+        # already draw mixture weights / credibility priors (all new RNG
+        # draws live strictly inside these enable_esg-gated branches).
+        if self._enable_regulation:
+            self.esg_regulation = (self._injected_regulation
+                                   if self._injected_regulation is not None
+                                   else ESGRegulation())
+        if enable_esg:
+            self.green_capital = GreenCapitalPrice()
+            if self._mixture_init != 'off':
+                self._mixtures_active = True
+
+        # Profile normalization: (symbol, score[, strategy[, firm_size]]).
+        self._green_profiles = {}
+        self._strategy_profiles = {}
+        self._size_profiles = {}
+        for entry in profiles:
+            sym, score = entry[0], entry[1]
+            self._green_profiles[sym] = score
+            self._strategy_profiles[sym] = entry[2] if len(entry) > 2 \
+                else 'honest'
+            self._size_profiles[sym] = entry[3] if len(entry) > 3 else None
+
         self.venues = [MarketVenue(sym, self.initial_price)
-                       for sym, _ in profiles]
-        self._green_profiles = {sym: score for sym, score in profiles}
+                       for sym in self._green_profiles]
 
         # Evolutionary population: shared wallets, per-venue positions.
         noise_count = num_traders // 3
@@ -312,16 +392,45 @@ class Simulation:
         self.state = State(state_ledger)
         self.trader_map[STATE_ID] = state_ledger
 
+        # Part G, WP2: one corporate ledger shell per listing ('corporate'
+        # has no decision handler either). It holds the treasury stake in
+        # its OWN stock -- the float backing harvesting channel (a) -- and
+        # settles treasury sales; sale proceeds are swept into the
+        # corporate balance each period. Counted in the venue float, so
+        # the balance seeding below stays consistent.
+        corporate_shells: dict[str, Trader] = {}
+        if enable_esg:
+            for venue in self.venues:
+                shell = Trader(f"T_CORP_{venue.symbol}", cash=0.0, shares=0,
+                               trader_type='corporate')
+                shell.positions = {}
+                self._add_position(venue, shell, CORPORATE_TREASURY_SHARES)
+                self.trader_map[shell.trader_id] = shell
+                corporate_shells[venue.symbol] = shell
+
         # Each corporate balance is seeded from that venue's TRUE float;
-        # Asset.__init__ then applies the historical green CAPEX penalty.
+        # Asset.__init__ then applies the historical green CAPEX penalty
+        # (re-pointed to the TRUE score, WP1.2) and derives the firm-size
+        # proxy (WP1.1) unless the profile pins one.
         for venue in self.venues:
             venue.asset = Asset(
                 venue.symbol, self.initial_price,
                 venue.shares_outstanding * self.initial_price,
-                green_score=self._green_profiles[venue.symbol])
+                green_score=self._green_profiles[venue.symbol],
+                firm_size=self._size_profiles[venue.symbol])
             venue.log_price.append(self.initial_price)
             venue.log_balance.append(venue.asset.balance)
-            venue.log_green_score = [venue.asset.green_score]  # Initialize tracker
+            venue.log_green_score = [venue.asset.green_score]  # Disclosed
+            venue.log_true_score = [venue.asset.true_green_score]
+            # Part G, WP2/WP5: the corporate policy agent (owns disclosure
+            # AND the NPV transition machinery; replaces the deleted
+            # stepped heuristic).
+            if enable_esg:
+                venue.policy = CorporatePolicy(
+                    venue.asset,
+                    self._strategy_profiles[venue.symbol],
+                    corporate_shells[venue.symbol],
+                    self.esg_regulation)
 
         # Legacy aliases: the primary listing backs every single-asset
         # accessor (asset, order_book, EMAs, volatility window), so
@@ -344,6 +453,11 @@ class Simulation:
             self.credit_market = CreditMarket(self.commercial_bank,
                                               primary.order_book)
             primary.order_book.clearing_house = self.credit_market
+            # Part G, WP7: the regulation object supplies the green
+            # supporting factor; margin collateral is the primary asset.
+            if self.esg_regulation is not None:
+                self.credit_market.esg_regulation = self.esg_regulation
+                self.credit_market.collateral_asset = primary.asset
 
         # Part F monetary policy: Taylor rule with Gaussian surprise,
         # anchored on economy-wide price growth and volume output gaps.
@@ -369,6 +483,17 @@ class Simulation:
         self.log_credit_rate: list[float] = []
         self.log_liquidations: list[int] = []
         self.log_policy_rate: list[float] = []
+
+        # Part G daily series (aligned with the active-day series above).
+        self.log_pgreen: list[float] = []          # WP5 price of green capital
+        self.log_dg_total: list[float] = []        # WP5 aggregate dg/dt
+        self.log_credibility: list[float] = []     # WP3 mean kappa
+        self.log_scandals: list[int] = []          # WP1 cumulative detections
+        self.log_greenwash_extracted: list[float] = []   # WP2, 5 channels
+        self.log_bond_stock: list[float] = []      # WP6 active face value
+        self.log_bond_coupons: list[float] = []    # WP6 cumulative coupons
+        self.log_bank_rr: list[float] = []         # WP7 required reserves
+        self.log_reserve_shortfalls: list[int] = []  # WP7 cumulative events
 
     def _add_position(self, venue: MarketVenue, owner: Trader,
                       shares: int, current_day: int = 0) -> AssetPosition:
@@ -414,6 +539,30 @@ class Simulation:
             for venue in self.venues:
                 self._add_position(venue, trader, self.initial_shares,
                                    current_day)
+            # Part G, WP4: strategy-mixture population. Initial weights
+            # are Dirichlet(alpha) via gammavariate (stdlib-only), the
+            # nominal type's component nudged to stay dominant so cohort
+            # demographics remain interpretable; 'vertex' keeps the exact
+            # legacy pure-type population (regression runs) while still
+            # exercising the mixture dispatch path.
+            if self._mixtures_active:
+                if self._mixture_init == 'dirichlet':
+                    raw = [random.gammavariate(DIRICHLET_CONCENTRATION, 1.0)
+                           for _ in self.STRATEGIES]
+                    own = self.STRATEGIES.index(trader_type)
+                    raw[own] += max(raw)         # Dominance nudge
+                    total = sum(raw)
+                    trader.enable_mixture(tuple(x / total for x in raw))
+                else:
+                    trader.enable_mixture(None)  # Exact legacy vertex
+            # Part G, WP3: credibility priors + the sophisticated
+            # (wedge-suspicious) fundamentalist fraction. Regulation-gated
+            # so ESG-without-regulation keeps Part F greenium pricing.
+            if self.esg_regulation is not None:
+                trader.sophisticated = \
+                    random.random() < SOPHISTICATED_FRACTION
+                trader.credibility = {venue.symbol: CREDIBILITY_PRIOR
+                                      for venue in self.venues}
         else:
             trader = Trader(t_id, self.initial_cash, self.initial_shares,
                             trader_type, current_day=current_day)
@@ -627,6 +776,30 @@ class Simulation:
                       if random.random() < SWITCH_CONSIDERATION_RATE]
         random.shuffle(candidates)
 
+        # Part G, WP4: with strategy mixtures active, the logit choice
+        # produces a TARGET VERTEX per candidate and the trader moves its
+        # weight vector a bounded WEIGHT_ADAPTATION_STEP toward it. The
+        # MAX_SWITCH_FRACTION population cap is reinterpreted as total L1
+        # weight mass moved per epoch: one legacy full switch equals an
+        # L1 distance of 2 between vertices, so budget_l1 = 2 * budget
+        # conserves the legacy migration volume exactly.
+        if self._mixtures_active:
+            budget_l1 = 2.0 * budget
+            moved_l1 = 0.0
+            switched = 0
+            for trader in candidates:
+                if moved_l1 >= budget_l1:
+                    break
+                target = random.choices(self.STRATEGIES,
+                                        weights=probs, k=1)[0]
+                dominant_before = trader.type
+                moved_l1 += trader.apply_weight_step(
+                    self.STRATEGIES.index(target), WEIGHT_ADAPTATION_STEP,
+                    day, self.order_book, self.trader_map)
+                if trader.type != dominant_before:
+                    switched += 1
+            return switched
+
         switched = 0
         for trader in candidates:
             if switched >= budget:
@@ -730,8 +903,10 @@ class Simulation:
         """
         Solvency-constrained dividends, per listing. The State forgoes
         dividends on sovereign-fund holdings (its treasury canon stays an
-        exact mirror of the ledger wallet), which can only leave the
-        corporate balance above the guaranteed floor.
+        exact mirror of the ledger wallet), and -- Part G -- corporate
+        treasury shells forgo dividends on their own stock (a corporate
+        paying itself would be circular). Both exclusions can only leave
+        the corporate balance above the guaranteed floor.
         """
         for venue in self.venues:
             shares_out = venue.shares_outstanding
@@ -745,7 +920,8 @@ class Simulation:
                 continue
             total_paid = 0.0
             for holder in venue.trader_map.values():
-                if holder.trader_id == STATE_ID:
+                if holder.trader_id == STATE_ID \
+                        or holder.type == 'corporate':
                     continue
                 payout = holder.total_shares * per_share
                 holder.cash += payout
@@ -753,22 +929,244 @@ class Simulation:
             venue.asset.balance -= total_paid
             self.total_dividends_paid += total_paid
 
-    def _corporate_transitions(self, day: int) -> None:
+    # -- Part G, WP5: NPV-driven corporate control law ------------------------ #
+    # (The Part F stepped heuristic `_corporate_transitions` -- a fixed
+    #  GREEN_TRANSITION_STEP whenever the balance cleared a floor -- has
+    #  been DELETED per WP5 and replaced by the continuous, reversible
+    #  dynamics owned by CorporatePolicy.)
+    def _corporate_daily(self, day: int, p_green: float) -> float:
         """
-        Part F, spec 2: endogenous corporate green transition. Any listing
-        below a perfect score executes a CAPEX step whenever the balance
-        sheet can absorb the cent-quantized cost while staying a safety
-        multiple above the corporate solvency floor.
+        Runs every listing's daily transition control law and maintenance
+        payment; returns the aggregate dg/dt for the WP5 metrics.
         """
-        for venue in self.venues:
-            asset = venue.asset
-            if asset.green_score >= 1.0:
+        venues = self.venues
+        total_disclosed = sum(v.asset.disclosed_green_score for v in venues)
+        epoch_budget = float(min(STATE_SUBSIDY_EPOCH_BUDGET_DEC,
+                                 self.state.treasury_dec))
+        rate = self.central_bank.policy_rate \
+            if self.central_bank is not None else self.rf_rate
+        bond_mult = self._bond_multiplier()
+        dg_total = 0.0
+        for venue in venues:
+            policy = venue.policy
+            if policy is None:
                 continue
-            if asset.balance - GREEN_TRANSITION_COST \
-                    >= CORPORATE_BALANCE_FLOOR * GREEN_TRANSITION_SAFETY:
-                asset.apply_green_transition(GREEN_TRANSITION_STEP,
-                                             GREEN_TRANSITION_COST, day)
+            dg = policy.transition_step(
+                day, p_green, rate, epoch_budget, total_disclosed,
+                self._venue_fundamental(venue),
+                self._funding_sensitivity(venue), bond_mult,
+                REG_REPORTING_PERIOD_DAYS)
+            policy.pay_maintenance()
+            dg_total += dg
+            if dg > 0.0:
                 self.green_transitions += 1
+        return dg_total
+
+    def _funding_sensitivity(self, venue: MarketVenue) -> float:
+        """
+        WP5/WP7 funding-cost sensitivity per unit of disclosed score per
+        day, from LIVE state: rho * phi * E * r_L / 365, where E is the
+        bank's credit exposure backed by this asset and r_L the current
+        lending rate. Zero when the risk weight is already floored (no
+        marginal relief), when no regulation is active, or for listings
+        that back no collateral (only the primary does in this build --
+        documented partial-equilibrium limitation).
+        """
+        credit, regulation = self.credit_market, self.esg_regulation
+        if credit is None or regulation is None \
+                or venue is not self.venues[0]:
+            return 0.0
+        disclosed = venue.asset.disclosed_green_score
+        if regulation.risk_weight(disclosed) <= regulation.omega_min:
+            return 0.0
+        exposure = credit.bank_exposure()
+        if exposure <= 0.0:
+            return 0.0
+        return (regulation.reserve_base_ratio
+                * regulation.green_risk_weight_discount
+                * exposure * credit.annual_rate / 365.0)
+
+    def _bond_multiplier(self) -> float:
+        """WP6 spillover on the subsidy sensitivity: earmarked green
+        proceeds sustain future subsidy capacity (see corporates.py
+        docstring; reduced-form modeling choice)."""
+        regulation, state = self.esg_regulation, self.state
+        if regulation is None or not regulation.green_bonds_allowed \
+                or state is None:
+            return 1.0
+        treasury = float(state.treasury_dec)
+        if treasury <= 0.0:
+            return 1.0
+        return 1.0 + float(state.green_proceeds_dec) / treasury
+
+    # -- Part G, WP1/WP2/WP3: reporting-period machinery ----------------------- #
+    def _reporting_period(self, day: int) -> None:
+        """
+        One corporate reporting period (aligned with the evolutionary
+        epoch): (1) credibility drift rewards the scandal-free stretch
+        just ended, (2) firms disclose (honestly or strategically),
+        (3) mandatory disclosers face the limited-assurance audit lottery
+        and detected wedges trigger scandals, (4) treasuries sell into
+        any greenium premium.
+        """
+        venues = self.venues
+        regulation = self.esg_regulation
+
+        # (1) WP3 trust drift: kappa += LAMBDA_TRUST * (1 - kappa).
+        if regulation is not None:
+            for trader in self.traders:
+                cred = trader.credibility
+                if cred is None:
+                    continue
+                for sym, kappa in cred.items():
+                    cred[sym] = kappa + LAMBDA_TRUST * (1.0 - kappa)
+
+        # (2) Disclosure decisions (WP2), on live-state sensitivities.
+        total_disclosed = sum(v.asset.disclosed_green_score for v in venues)
+        epoch_budget = float(min(STATE_SUBSIDY_EPOCH_BUDGET_DEC,
+                                 self.state.treasury_dec))
+        rate = self.central_bank.policy_rate \
+            if self.central_bank is not None else self.rf_rate
+        eligible = sum(1 for v in venues
+                       if v.asset.disclosed_green_score
+                       >= STATE_GREEN_THRESHOLD)
+        for venue in venues:
+            policy = venue.policy
+            if policy is None:
+                continue
+            float_value = venue.shares_outstanding \
+                * venue.asset.get_last_price()
+            policy.decide_disclosure(
+                day, rate, epoch_budget, total_disclosed,
+                self._venue_fundamental(venue),
+                self._funding_sensitivity(venue),
+                STATE_DAILY_INVESTMENT, eligible, float_value,
+                REG_REPORTING_PERIOD_DAYS)
+
+        # (3) WP1.3 limited-assurance audits -> WP1.5 scandals. Only
+        # mandatory disclosers are ever audited; the pre-enforcement
+        # regime (WP1.7) consumes zero RNG draws inside run_audit.
+        if regulation is not None and regulation.enforcement_active(day):
+            for venue in venues:
+                asset = venue.asset
+                if not regulation.is_mandatory_discloser(
+                        asset.firm_size, day):
+                    continue
+                if regulation.run_audit(asset.unlawful_wedge, day):
+                    self._trigger_scandal(venue, day)
+
+        # (4) WP2 channel (a): treasury clips sold into the greenium.
+        for venue in venues:
+            policy = venue.policy
+            if policy is None:
+                continue
+            swept_before = policy.total_treasury_swept
+            policy.sell_treasury(venue, day,
+                                 self._venue_fundamental(venue))
+            self.total_treasury_sweeps += (policy.total_treasury_swept
+                                           - swept_before)
+
+    def _trigger_scandal(self, venue: MarketVenue, day: int) -> None:
+        """
+        WP1.5 sanction + WP2/WP3 scandal dynamics: penalty capped at 3%
+        of the turnover proxy (and never below the corporate solvency
+        floor, so the transfer is exact: what leaves the balance is
+        precisely what enters the treasury), disclosed := true, and the
+        credibility collapse with sector-wide spillover.
+        """
+        asset = venue.asset
+        regulation = self.esg_regulation
+        wedge = asset.unlawful_wedge
+
+        penalty_dec = regulation.penalty_for(asset.balance)
+        headroom_dec = Decimal(repr(round(
+            asset.balance - CORPORATE_BALANCE_FLOOR, 2)))
+        if penalty_dec > headroom_dec:
+            penalty_dec = max(headroom_dec, Decimal("0"))
+        if penalty_dec > 0:
+            asset.balance -= float(penalty_dec)   # OU-synced setter
+            self.state.receive_penalty(penalty_dec)
+        regulation.record_scandal(day, venue.symbol, wedge, penalty_dec)
+        venue.policy.on_scandal(day)   # Resets disclosed := true, stamps day
+
+        # WP3: kappa collapses on the scandal asset, spills over mildly
+        # to every other green-disclosing asset (systemic distrust).
+        for trader in self.traders:
+            cred = trader.credibility
+            if cred is None:
+                continue
+            cred[venue.symbol] *= SCANDAL_CREDIBILITY_SHOCK
+            for other in self.venues:
+                if other is venue:
+                    continue
+                if other.asset.disclosed_green_score > 0.0:
+                    cred[other.symbol] *= SCANDAL_SECTOR_SPILLOVER
+
+    def _credibility_index(self) -> dict:
+        """Per-asset mean kappa across the evolutionary population (the
+        institutional counterfactual input and the WP3 logging index)."""
+        venues = self.venues
+        sums = {v.symbol: 0.0 for v in venues}
+        count = 0
+        for trader in self.traders:
+            cred = trader.credibility
+            if cred is None:
+                continue
+            count += 1
+            for sym, kappa in cred.items():
+                sums[sym] += kappa
+        if count == 0:
+            return {v.symbol: 1.0 for v in venues}
+        return {sym: total / count for sym, total in sums.items()}
+
+    def _log_esg_daily(self, dg_total: float,
+                       credibility_index: Optional[dict]) -> None:
+        """Appends one day of Part G series (weekends log carry-overs so
+        every series stays aligned with the active-day logs)."""
+        self.log_pgreen.append(self.green_capital.value
+                               if self.green_capital is not None else 0.0)
+        self.log_dg_total.append(dg_total)
+        if credibility_index:
+            self.log_credibility.append(
+                sum(credibility_index.values()) / len(credibility_index))
+        else:
+            self.log_credibility.append(1.0)
+        regulation = self.esg_regulation
+        self.log_scandals.append(
+            regulation.scandals_detected if regulation is not None else 0)
+        extracted = 0.0
+        for venue in self.venues:
+            if venue.policy is not None:
+                extracted += sum(venue.policy.harvest.values())
+        self.log_greenwash_extracted.append(extracted)
+        state = self.state
+        self.log_bond_stock.append(state.bond_stock())
+        self.log_bond_coupons.append(float(state.coupons_paid_dec))
+        bank = self.commercial_bank
+        self.log_bank_rr.append(bank.required_reserves
+                                if bank is not None else 0.0)
+        self.log_reserve_shortfalls.append(
+            bank.reserve_shortfall_events if bank is not None else 0)
+
+    def _debug_validate_conservation(self) -> None:
+        """
+        Part G conservation audit (per-WP identities, see the module
+        docstrings of regulation.py / state_intervention.py /
+        corporates.py). Assertion-based: runs at end-of-run, costs O(1).
+        """
+        state, regulation = self.state, self.esg_regulation
+        if regulation is not None:
+            # WP1.5: penalties are transfers, never sinks.
+            assert regulation.total_penalties_dec \
+                == state.penalty_inflow_dec, "penalty ledger asymmetry"
+        # WP6: every earmarked euro is in the sub-ledger or was spent green.
+        assert state.bonds_issued_dec \
+            == state.green_proceeds_dec + state.green_proceeds_spent_dec, \
+            "green-bond proceeds earmarking violated"
+        assert state.green_proceeds_dec >= 0, "earmarked ledger negative"
+        bank = self.commercial_bank
+        if bank is not None:
+            assert bank.required_reserves_dec >= 0, "negative reserves"
 
     def _update_policy_rate(self, total_volume: float) -> None:
         """
@@ -1008,45 +1406,68 @@ class Simulation:
 
     def _run_multi_asset(self) -> None:
         """
-        Part F daily cycle over every listed venue. Mirrors the legacy
-        loop step-for-step, adding: corporate green transitions and state
-        subsidies on epoch days, the sovereign green fund's daily market
-        buys, greenwashing manipulator FSMs, and the Taylor-rule policy
-        update feeding the credit market's borrowing base.
+        Part F/G daily cycle over every listed venue. Mirrors the legacy
+        loop step-for-step, adding: the WP5 price-of-green-capital OU and
+        daily NPV transition control laws, the WP1/WP2 reporting periods
+        (disclosure, limited-assurance audits, scandals, treasury sales),
+        state subsidies keyed on disclosed scores, the sovereign green
+        fund's daily market buys, WP6 green-bond issuance and servicing,
+        greenwashing manipulator FSMs, the WP7 reserve requirement inside
+        the credit cycle, and the Taylor-rule policy update feeding the
+        credit market's borrowing base.
         """
         venues = self.venues
         primary = venues[0]
         credit = self.credit_market
+        regulation = self.esg_regulation
         print(f"Starting ESG Multi-Asset Simulation: {len(venues)} assets, "
               f"{self.days} days...")
 
         for day in range(1, self.days + 1):
             last_price = {v.symbol: v.asset.get_last_price() for v in venues}
 
-            # Weekends: interest accrues, no trading.
+            # Weekends: interest accrues (and bond coupons falling on a
+            # weekend still pay -- servicing sits next to accrue_interest
+            # per WP6), no trading.
             if self.is_weekend(day):
                 self.accrue_interest()
+                if regulation is not None:
+                    self.state.service_bonds(day, self.commercial_bank,
+                                             self.trader_map)
                 for venue in venues:
                     close = last_price[venue.symbol]
                     venue.asset.record_close(close)
                     venue.log_price.append(close)
                     venue.log_balance.append(venue.asset.balance)
-                    venue.log_green_score.append(venue.asset.green_score)  # Record weekend score
+                    venue.log_green_score.append(venue.asset.green_score)
+                    venue.log_true_score.append(
+                        venue.asset.true_green_score)
                 self.log_price.append(last_price[primary.symbol])
                 self.log_balance.append(primary.asset.balance)
                 self.log_daily_metrics(last_price[primary.symbol])
+                self._log_esg_daily(
+                    0.0, self._credibility_index()
+                    if regulation is not None else None)
                 continue
 
-            # 1. OU information arrival per listing; on epoch days the
-            #    corporates decide green transitions (CAPEX first), then
-            #    dividends are paid and the State disburses subsidies.
+            # 1. OU information arrival per listing, then the WP5 price
+            #    of green capital and the daily corporate control laws
+            #    (continuous transition + maintenance -- the epoch-day
+            #    stepped heuristic is gone). On reporting days (aligned
+            #    with the epoch) firms disclose, auditors sample, and
+            #    treasuries sell BEFORE dividends and subsidies flow.
             for venue in venues:
                 venue.asset.update_daily_fundamental()
+            dg_total = 0.0
+            if self.green_capital is not None:
+                p_green = self.green_capital.update_daily()
+                dg_total = self._corporate_daily(day, p_green)
             if day % EVOLUTION_EPOCH_DAYS == 0:
-                self._corporate_transitions(day)
+                if self.green_capital is not None:
+                    self._reporting_period(day)
                 self._pay_dividends_multi()
                 self.total_subsidies_paid += self.state.pay_subsidies(
-                    venues, day)
+                    venues, day, regulation)
 
             # 2. Fluid friction and probabilistic order decay, per venue.
             rel_vol = {}
@@ -1065,33 +1486,44 @@ class Simulation:
                     mid, venue.order_book, venue.trader_map, day)
 
             # 4. The sovereign green fund crosses the spread on qualifying
-            #    listings, then the greenwashing manipulators pick their
-            #    narrative targets.
-            self.state.invest_green(venues, day)
+            #    listings (disclosed-score eligibility, WP3 institutional
+            #    reliance -- credibility-discounted only under the
+            #    counterfactual toggle), then the greenwashing
+            #    manipulators pick their narrative targets.
+            credibility_index = self._credibility_index() \
+                if regulation is not None else None
+            self.state.invest_green(venues, day, regulation,
+                                    credibility_index)
             for manip in self.manipulators:
                 manip.act_green(venues, day)
             if credit is not None:
                 credit.poll_intraday(primary.trader_map, day)
 
             # 5. Evolutionary traders sweep every listing in randomised
-            #    order; per-venue fundamentals are loop invariants.
+            #    order; per-venue fundamentals are loop invariants. The
+            #    green context is the DISCLOSED score (WP1.2) plus the
+            #    WP3 wedge-suspicion flag (disclosed rose more recently
+            #    than any observable real transition).
             venue_ctx = []
             for venue in venues:
+                asset = venue.asset
                 venue_ctx.append((
                     venue,
                     self._venue_fundamental(venue),
                     venue.ema_fast.value, venue.ema_slow.value,
                     venue.ema_slow.count >= 15,
                     rel_vol[venue.symbol],
-                    venue.asset.green_score,
+                    asset.disclosed_green_score,
+                    asset.last_upgrade_day > asset.last_transition_day,
                 ))
             active_traders = list(self.traders)
             random.shuffle(active_traders)
             day_trades = {venue.symbol: [] for venue in venues}
 
             for trader in active_traders:
+                trader_cred = trader.credibility
                 for (venue, v_fund, ef, es, ema_ready,
-                        vol, green) in venue_ctx:
+                        vol, green, suspicious) in venue_ctx:
                     book = venue.order_book
                     position = trader.positions[venue.symbol]
                     ref_price = book.get_midpoint(last_price[venue.symbol])
@@ -1099,7 +1531,10 @@ class Simulation:
 
                     decision = trader.decide_order(
                         ref_price, v_fund, ef, es, ema_ready, imbalance,
-                        vol, green)
+                        vol, green,
+                        trader_cred[venue.symbol]
+                        if trader_cred is not None else 1.0,
+                        suspicious)
                     if decision is None:
                         continue
 
@@ -1135,8 +1570,18 @@ class Simulation:
                 if credit is not None:
                     credit.poll_intraday(primary.trader_map, day)
 
-            # 6. Daily interest on every wallet.
+            # 6. Daily interest on every wallet; WP6 bond servicing sits
+            #    next to it, and the primary market opens when the
+            #    treasury runs below its funding threshold.
             self.accrue_interest()
+            if regulation is not None:
+                self.state.service_bonds(day, self.commercial_bank,
+                                         self.trader_map)
+                self.state.issue_green_bonds(
+                    day,
+                    self.central_bank.policy_rate
+                    if self.central_bank is not None else self.rf_rate,
+                    self.commercial_bank, self.trader_map, regulation)
 
             # 7 + 8. Per-venue VWAP closes, histories, and regime updates.
             total_volume = 0.0
@@ -1153,7 +1598,8 @@ class Simulation:
                 venue.asset.record_close(closing)
                 venue.log_price.append(closing)
                 venue.log_balance.append(venue.asset.balance)
-                venue.log_green_score.append(venue.asset.green_score)  # Record trading day score
+                venue.log_green_score.append(venue.asset.green_score)
+                venue.log_true_score.append(venue.asset.true_green_score)
                 venue.ema_fast.update(closing)
                 venue.ema_slow.update(closing)
                 venue.recent_closes.append(closing)
@@ -1166,7 +1612,9 @@ class Simulation:
             self.log_balance.append(primary.asset.balance)
 
             # 8.5 Monetary policy: Taylor rule with Gaussian surprise,
-            #     then the daily credit cycle at the new borrowing base.
+            #     then the daily credit cycle at the new borrowing base
+            #     (which now refreshes the WP7 green-weighted reserve
+            #     requirement before originations).
             if self.central_bank is not None:
                 self._update_policy_rate(total_volume)
             if credit is not None:
@@ -1175,6 +1623,22 @@ class Simulation:
                     self.strategy_attractiveness, primary.trader_map,
                     [t.positions[primary.symbol] for t in self.traders],
                     primary.market_maker)
+                # WP2 channel (d): daily funding advantage the wedge buys
+                # the collateral-backing firm -- reserve relief between
+                # true-score and disclosed-score risk weights, re-priced
+                # at the live lending rate. Pure metric (no cash moves).
+                if regulation is not None and primary.policy is not None:
+                    p_asset = primary.asset
+                    relief = (regulation.risk_weight(
+                                  p_asset.true_green_score)
+                              - regulation.risk_weight(
+                                  p_asset.disclosed_green_score))
+                    if relief > 0.0:
+                        exposure = credit.bank_exposure()
+                        if exposure > 0.0:
+                            primary.policy.harvest['funding'] += (
+                                regulation.reserve_base_ratio * relief
+                                * exposure * credit.annual_rate / 365.0)
 
             # 9. Bankruptcies and (capped, logit-driven) evolution.
             self.handle_bankruptcies(day)
@@ -1189,9 +1653,14 @@ class Simulation:
                                 venue.asset.get_last_price()),
                             venue.order_book, venue.trader_map, day)
 
-            # 10. Log (legacy series follow the primary listing).
+            # 10. Log (legacy series follow the primary listing; Part G
+            #     series are appended in lock-step).
             self.log_daily_metrics(primary_close, epoch_wealth_cache)
+            self._log_esg_daily(dg_total, credibility_index)
 
+        # Part G conservation audit: every euro of penalties, bond
+        # proceeds and coupons must be traceable (assertion pass).
+        self._debug_validate_conservation()
         print("Simulation complete.")
 
     # -- plotting ----------------------------------------------------------- #
@@ -1201,8 +1670,10 @@ class Simulation:
         import matplotlib.pyplot as plt
 
         plt.style.use('default')
-        fig, axes = plt.subplots(5, 1, figsize=(12, 26))
-        ax1, ax2, ax3, ax4, ax5 = axes
+        esg_active = self.venues is not None and len(self.log_pgreen) > 0
+        rows = 8 if esg_active else 5
+        fig, axes = plt.subplots(rows, 1, figsize=(12, 5.2 * rows))
+        ax1, ax2, ax3, ax4, ax5 = axes[:5]
         days_range = list(range(self.days + 1))
         active_days = list(range(1, self.days + 1))
         colors = {'noise': '#d62728', 'fundamentalist': '#2ca02c',
@@ -1221,11 +1692,22 @@ class Simulation:
         ax1.set_ylabel('Market Price ($)', fontsize=11, fontweight='bold')
         ax1.grid(True, linestyle=':', alpha=0.6)
 
-        # Subplot 2: Real Historical Evolution of Green Scores
+        # Subplot 2: Disclosed (solid) vs True (dashed) green scores, with
+        # detected-scandal markers (Part G, WP1/WP2 wedge visualization).
         if self.venues is not None:
             for venue in self.venues:
-                ax2.plot(days_range, venue.log_green_score, label=f'{venue.symbol}', alpha=0.7, linewidth=1.2)
-            ax2.set_title('Corporate Sustainability Evolution (Green Transition Trajectories)', fontsize=13, fontweight='bold', pad=15)
+                line, = ax2.plot(days_range, venue.log_green_score,
+                                 label=f'{venue.symbol}', alpha=0.7,
+                                 linewidth=1.2)
+                if len(venue.log_true_score) == len(days_range):
+                    ax2.plot(days_range, venue.log_true_score,
+                             linestyle='--', alpha=0.45, linewidth=1.0,
+                             color=line.get_color())
+            if self.esg_regulation is not None:
+                for (s_day, s_sym, _w, _p) in self.esg_regulation.scandal_log:
+                    ax2.axvline(s_day, color='red', alpha=0.35,
+                                linewidth=0.9)
+            ax2.set_title('Disclosed (solid) vs True (dashed) Green Scores -- scandals in red', fontsize=13, fontweight='bold', pad=15)
             ax2.set_ylabel('Green Score', fontsize=11, fontweight='bold')
             ax2.set_ylim(-0.05, 1.05)
             ax2.grid(True, linestyle=':', alpha=0.6)
@@ -1254,11 +1736,73 @@ class Simulation:
         # Subplot 5: Demografia
         for s in self.STRATEGIES:
             ax5.plot(active_days, self.log_demographics[s], color=colors[s], linewidth=1.8, label=f'{s.capitalize()} Count')
-        ax5.set_title('Trader Population Demographics Over Time', fontsize=13, fontweight='bold', pad=15)
+        ax5.set_title('Trader Population Demographics Over Time (dominant mixture component)', fontsize=13, fontweight='bold', pad=15)
         ax5.set_xlabel('Calendar Days', fontsize=11, fontweight='bold')
         ax5.set_ylabel('Number of Active Agents', fontsize=11, fontweight='bold')
         ax5.grid(True, linestyle=':', alpha=0.6)
         ax5.legend(loc='upper left', frameon=True)
+
+        # Part G panels (ESG mode only).
+        if esg_active:
+            ax6, ax7, ax8 = axes[5:8]
+
+            # Subplot 6 (WP3 + WP2): market credibility vs the wealth the
+            # greenwashers extracted through the five harvesting channels.
+            ax6.plot(active_days, self.log_credibility, color='#2ca02c',
+                     linewidth=1.8, label='Mean credibility index (kappa)')
+            ax6.set_ylim(0.0, 1.05)
+            ax6.set_ylabel('Credibility', fontsize=11, fontweight='bold')
+            ax6b = ax6.twinx()
+            ax6b.plot(active_days, self.log_greenwash_extracted,
+                      color='#8c564b', linewidth=1.6,
+                      label='Cumulative greenwasher extraction ($)')
+            ax6b.set_ylabel('Extracted wealth ($)', fontsize=10)
+            ax6.set_title('Credibility Beliefs vs Greenwasher Extracted Wealth', fontsize=13, fontweight='bold', pad=15)
+            ax6.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax6.get_legend_handles_labels()
+            lines2, labels2 = ax6b.get_legend_handles_labels()
+            ax6.legend(lines1 + lines2, labels1 + labels2,
+                       loc='upper left', frameon=True)
+
+            # Subplot 7 (WP5): price of green capital vs aggregate dg/dt.
+            ax7.plot(active_days, self.log_pgreen, color='#17becf',
+                     linewidth=1.8, label='P_green (price of green capital)')
+            ax7.set_ylabel('P_green', fontsize=11, fontweight='bold')
+            ax7b = ax7.twinx()
+            ax7b.plot(active_days, self.log_dg_total, color='#bcbd22',
+                      linewidth=1.2, alpha=0.8,
+                      label='Aggregate dg/dt (all listings)')
+            ax7b.axhline(0.0, color='gray', linewidth=0.8, alpha=0.5)
+            ax7b.set_ylabel('dg/dt', fontsize=10)
+            ax7.set_title('NPV-Driven Transition: Green Capital Price vs Aggregate dg/dt', fontsize=13, fontweight='bold', pad=15)
+            ax7.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax7.get_legend_handles_labels()
+            lines2, labels2 = ax7b.get_legend_handles_labels()
+            ax7.legend(lines1 + lines2, labels1 + labels2,
+                       loc='upper left', frameon=True)
+
+            # Subplot 8 (WP6 + WP7): sovereign green bonds and the bank's
+            # green-weighted reserve requirement / shortfall events.
+            ax8.plot(active_days, self.log_bond_stock, color='#1f77b4',
+                     linewidth=1.8, label='Green-bond stock (face value $)')
+            ax8.plot(active_days, self.log_bond_coupons, color='#ff7f0e',
+                     linewidth=1.4, label='Cumulative coupons paid ($)')
+            ax8.set_ylabel('Bond program ($)', fontsize=11,
+                           fontweight='bold')
+            ax8b = ax8.twinx()
+            ax8b.plot(active_days, self.log_bank_rr, color='#d62728',
+                      linewidth=1.4, label='Bank required reserves ($)')
+            ax8b.plot(active_days, self.log_reserve_shortfalls,
+                      color='#9467bd', linewidth=1.2, linestyle='--',
+                      label='Cumulative reserve shortfalls')
+            ax8b.set_ylabel('Reserves / shortfalls', fontsize=10)
+            ax8.set_title('Sovereign Green Bonds and Green-Weighted Bank Reserves', fontsize=13, fontweight='bold', pad=15)
+            ax8.set_xlabel('Calendar Days', fontsize=11, fontweight='bold')
+            ax8.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax8.get_legend_handles_labels()
+            lines2, labels2 = ax8b.get_legend_handles_labels()
+            ax8.legend(lines1 + lines2, labels1 + labels2,
+                       loc='upper left', frameon=True)
 
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
@@ -1268,22 +1812,47 @@ class Simulation:
 
 def export_simulation_metrics(sim: Simulation,
                               csv_path: str = "simulation_results.csv") -> None:
-    """Exports daily metrics to CSV."""
+    """
+    Exports daily metrics to CSV. The legacy single-asset layout is
+    byte-compatible; in ESG mode (Part G) the row is extended with:
+    the price of green capital and aggregate dg/dt (WP5), the mean
+    credibility index and cumulative scandal count (WP3/WP1), cumulative
+    greenwasher extraction (WP2), green-bond stock and cumulative coupons
+    (WP6), bank required reserves and cumulative reserve-shortfall events
+    (WP7), plus per-asset disclosed/true score pairs (the wedge is their
+    difference).
+    """
+    esg_active = sim.venues is not None and len(sim.log_pgreen) > 0
     with open(csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([
+        header = [
             'day', 'asset_price', 'corporate_balance',
             'noise_count', 'fundamentalist_count', 'chartist_count',
             'noise_wealth', 'fundamentalist_wealth', 'chartist_wealth',
             'market_maker_wealth', 'manipulator_wealth',
-        ])
+        ]
+        if esg_active:
+            header += ['p_green', 'aggregate_dg', 'credibility_index',
+                       'scandals_cum', 'greenwash_extracted',
+                       'green_bond_stock', 'bond_coupons_cum',
+                       'bank_required_reserves', 'reserve_shortfalls_cum']
+            for venue in sim.venues:
+                header += [f'{venue.symbol}_disclosed',
+                           f'{venue.symbol}_true']
+        writer.writerow(header)
         for d in range(sim.days + 1):
             if d == 0:
-                writer.writerow([0, sim.log_price[0], sim.log_balance[0],
-                                 "", "", "", "", "", "", "", ""])
+                row = [0, sim.log_price[0], sim.log_balance[0],
+                       "", "", "", "", "", "", "", ""]
+                if esg_active:
+                    row += [""] * 9
+                    for venue in sim.venues:
+                        row += [venue.log_green_score[0],
+                                venue.log_true_score[0]]
+                writer.writerow(row)
             else:
                 i = d - 1
-                writer.writerow([
+                row = [
                     d, sim.log_price[d], sim.log_balance[d],
                     sim.log_demographics['noise'][i],
                     sim.log_demographics['fundamentalist'][i],
@@ -1293,5 +1862,16 @@ def export_simulation_metrics(sim: Simulation,
                     sim.log_avg_wealth['chartist'][i],
                     sim.log_mm_wealth[i],
                     sim.log_manip_wealth[i],
-                ])
+                ]
+                if esg_active:
+                    row += [sim.log_pgreen[i], sim.log_dg_total[i],
+                            sim.log_credibility[i], sim.log_scandals[i],
+                            sim.log_greenwash_extracted[i],
+                            sim.log_bond_stock[i], sim.log_bond_coupons[i],
+                            sim.log_bank_rr[i],
+                            sim.log_reserve_shortfalls[i]]
+                    for venue in sim.venues:
+                        row += [venue.log_green_score[d],
+                                venue.log_true_score[d]]
+                writer.writerow(row)
     print(f"Simulation metrics exported to '{csv_path}'.")

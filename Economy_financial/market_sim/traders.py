@@ -29,7 +29,10 @@ from market_sim.constants import (
     GREEN_SENTIMENT_EVENT_BOOST,
     GREEN_SENTIMENT_WINDOW_DAYS,
     GREENIUM_GAMMA,
+    NOISE_CREDIBILITY_DILUTION,
+    NOISE_GREEN_TILT,
     STATE_GREEN_THRESHOLD,
+    WEDGE_SUSPICION_HAIRCUT,
 )
 from market_sim.models import LimitOrder, MarketOrder
 
@@ -66,6 +69,11 @@ class Trader:
         'chartist': '_decide_chartist',
     }
 
+    # Part G, WP4: canonical component order of the mixture weight vector
+    # w = (w_noise, w_fund, w_chart). Pure legacy types are the degenerate
+    # vertices of this simplex.
+    STRATEGY_ORDER = ('noise', 'fundamentalist', 'chartist')
+
     def __init__(self, trader_id: str, cash: float, shares: int,
                  trader_type: str, current_day: int = 0):
         self.trader_id = trader_id            # Immutable canonical id (map key)
@@ -98,16 +106,113 @@ class Trader:
         # {symbol: AssetPosition} dict when the ESG ecosystem is active.
         self.positions = None
 
+        # -- Part G, WP4: strategy-mixture state. The weight vector starts
+        # at the pure-type vertex, so every legacy construction path keeps
+        # working unchanged; `_mixture_active` stays False (and decide
+        # dispatch stays the zero-draw bound-handler path) unless the
+        # Simulation explicitly enables mixtures in ESG mode.
+        self.weights = self._vertex_weights(trader_type)
+        self._mixture_active = False
+        # Pre-bound handler triple (O(1) dispatch: the mixture only ever
+        # selects among already-bound methods, never resolves names).
+        self._handlers = (self._decide_noise, self._decide_fundamentalist,
+                          self._decide_chartist)
+
+        # -- Part G, WP3: per-asset credibility beliefs kappa in [0, 1]
+        # ({symbol: kappa} in ESG mode, None otherwise) and the
+        # sophistication flag of the wedge-suspicious fundamentalist
+        # fraction. Both inert defaults.
+        self.credibility = None
+        self.sophisticated = False
+
     # -- identity ---------------------------------------------------------- #
     @property
     def label(self) -> str:
-        """Log-friendly id whose prefix always reflects the current strategy."""
+        """Log-friendly id whose prefix always reflects the current
+        strategy (in mixture mode, `type` tracks the DOMINANT component,
+        so the label reports it per the WP4 contract)."""
         return f"{self.trader_id}[{self.type}]"
 
     def _bind_decision_handler(self) -> None:
         """Resolves the current strategy to a bound decision method."""
         name = self._HANDLER_NAMES.get(self.type)
         self._decision_handler = getattr(self, name) if name else None
+
+    # -- Part G, WP4: strategy-mixture machinery ----------------------------- #
+    @classmethod
+    def _vertex_weights(cls, trader_type: str) -> tuple:
+        """The degenerate simplex vertex of a pure legacy type (uniform
+        placeholder for non-evolutionary types, which never dispatch
+        through the mixture)."""
+        if trader_type in cls.STRATEGY_ORDER:
+            return tuple(1.0 if s == trader_type else 0.0
+                         for s in cls.STRATEGY_ORDER)
+        return (1.0, 0.0, 0.0)
+
+    @property
+    def dominant_strategy(self) -> str:
+        """The mixture component with the largest weight."""
+        weights = self.weights
+        best = 0
+        if weights[1] > weights[best]:
+            best = 1
+        if weights[2] > weights[best]:
+            best = 2
+        return self.STRATEGY_ORDER[best]
+
+    def enable_mixture(self, weights: Optional[tuple] = None) -> None:
+        """
+        Switches decision dispatch to the WP4 mixture: per decision call
+        one handler is sampled from `weights` via `random.choices` (single
+        shared RNG stream preserved). Pure vertices remain exactly the
+        legacy behaviours -- the sample is then deterministic.
+        """
+        if weights is not None:
+            self.weights = weights
+            self.type = self.dominant_strategy
+            self._bind_decision_handler()
+        self._mixture_active = True
+        # Weight snapshots replace type strings in the history (WP4).
+        self.strategy_history.append((self.strategy_history[-1][0],
+                                      self.weights))
+
+    def apply_weight_step(self, target_index: int, step: float, day: int,
+                          order_book: "OrderBook",
+                          trader_map: dict) -> float:
+        """
+        WP4 evolutionary move: shifts the weight vector a bounded step
+        toward the target vertex e_k,
+
+            w' = w + step * (e_k - w),
+
+        which preserves the simplex exactly (convex combination of two
+        simplex points; unit-tested). Returns the L1 mass moved
+        (= step * ||e_k - w||_1) so the caller can enforce the
+        population-level migration budget. If the dominant component
+        changes, open orders are cancelled (they were priced under the
+        old dominant logic) exactly as legacy `switch_strategy` does.
+        """
+        w = self.weights
+        moved = step * (2.0 * (1.0 - w[target_index]))   # ||e_k - w||_1
+        if moved <= 0.0:
+            return 0.0
+        new_w = tuple(
+            wi + step * ((1.0 if i == target_index else 0.0) - wi)
+            for i, wi in enumerate(w))
+        self.weights = new_w
+        new_dominant = self.dominant_strategy
+        if new_dominant != self.type:
+            if self.positions is not None:
+                for pos in self.positions.values():
+                    for oid in list(pos.active_orders):
+                        pos.book.cancel_order(oid, pos.book_map)
+            else:
+                for oid in list(self.active_orders):
+                    order_book.cancel_order(oid, trader_map)
+            self.type = new_dominant
+            self._bind_decision_handler()
+        self.strategy_history.append((day, new_w))
+        return moved
 
     def switch_strategy(self, new_type: str, day: int,
                         order_book: "OrderBook", trader_map: dict) -> None:
@@ -176,7 +281,8 @@ class Trader:
     def decide_order(self, current_price: float, v_fundamental: float,
                      ema_fast: float, ema_slow: float, ema_ready: bool,
                      book_imbalance: float, rel_volatility: float,
-                     green_score: float = 0.0) -> Optional[tuple]:
+                     green_score: float = 0.0, credibility: float = 1.0,
+                     suspicious: bool = False) -> Optional[tuple]:
         """
         Returns (order_type, side, price, quantity) or None.
 
@@ -184,24 +290,61 @@ class Trader:
         (the surface the Manipulator's spoof orders exploit).
         `rel_volatility` is the realised relative volatility of recent
         closes, which stretches the fundamentalist corridor (Part B).
-        `green_score` (Part F) is the asset's sustainability score; the
-        default 0.0 makes the greenium a multiplication by exactly 1.0,
-        so single-asset behavior is bit-identical.
+        `green_score` (Part F / re-pointed in Part G, WP1.2) is the
+        asset's DISCLOSED sustainability score; the default 0.0 makes the
+        greenium a multiplication by exactly 1.0, so single-asset behavior
+        is bit-identical.
+        `credibility` (Part G, WP3) is this trader's kappa belief for the
+        asset; the default 1.0 (full trust) reproduces the pre-Part-G
+        greenium exactly. `suspicious` marks a disclosed score that rose
+        without an observable transition event.
+
+        WP4 dispatch: with the mixture inactive (every legacy path), the
+        pre-bound handler runs with zero extra RNG draws. With the mixture
+        active, the handler is sampled from the weight vector via
+        `random.choices` on the single shared RNG stream. The sampling
+        variant was chosen over signal-blending deliberately: the three
+        handlers return heterogeneous order intents (market vs. limit,
+        different price logic, integer sizes), and averaging a passive
+        LIMIT SELL with a MARKET BUY has no well-defined order-sizing
+        semantics -- blending would break the exact escrow arithmetic
+        downstream. Sampling keeps each emitted order internally coherent
+        while the FLOW mixes in exactly the weight proportions in
+        expectation.
         """
-        handler = self._decision_handler
-        if handler is None:
-            return None
+        if self._mixture_active:
+            handler = random.choices(self._handlers,
+                                     weights=self.weights, k=1)[0]
+        else:
+            handler = self._decision_handler
+            if handler is None:
+                return None
         return handler(current_price, v_fundamental, ema_fast, ema_slow,
                        ema_ready, book_imbalance, rel_volatility,
-                       green_score)
+                       green_score, credibility, suspicious)
 
     def _decide_noise(self, current_price: float, v_fundamental: float,
                       ema_fast: float, ema_slow: float, ema_ready: bool,
                       imbalance: float, rel_volatility: float,
-                      green_score: float = 0.0) -> Optional[tuple]:
-        """Random trader, mildly herding on visible book pressure."""
+                      green_score: float = 0.0, credibility: float = 1.0,
+                      suspicious: bool = False) -> Optional[tuple]:
+        """
+        Random trader, mildly herding on visible book pressure.
+
+        Part G, WP3: a DILUTED credibility term tilts the buy/sell split
+        toward credible green stories -- noise traders half-believe the
+        disclosure regardless of scandals (dilution factor
+        NOISE_CREDIBILITY_DILUTION). The whole block is skipped for
+        green_score == 0, keeping the legacy path bit-identical.
+        """
         buy_p = 0.25 + 0.15 * imbalance
         sell_p = 0.25 - 0.15 * imbalance
+        if green_score > 0.0:
+            kappa_diluted = 1.0 - NOISE_CREDIBILITY_DILUTION \
+                * (1.0 - credibility)
+            tilt = NOISE_GREEN_TILT * kappa_diluted * green_score
+            buy_p += tilt
+            sell_p -= tilt
         roll = random.random()
         if roll < buy_p:
             action = 'BUY'
@@ -220,18 +363,25 @@ class Trader:
                                v_fundamental: float, ema_fast: float,
                                ema_slow: float, ema_ready: bool,
                                imbalance: float, rel_volatility: float,
-                               green_score: float = 0.0) -> Optional[tuple]:
+                               green_score: float = 0.0,
+                               credibility: float = 1.0,
+                               suspicious: bool = False) -> Optional[tuple]:
         """
         Part B, fix 2: elastic probabilistic corridor.
-        Part F: greenium-adjusted fair value. The raw OU fundamental is
-        stretched by the market's sustainable conviction,
+        Part F / Part G (WP3): greenium-adjusted fair value on the
+        CREDIBILITY-DISCOUNTED disclosed score,
 
-            V_green_fair = V_fundamental * (1 + GREENIUM_GAMMA * score),
+            V_green_fair = V_fundamental
+                           * (1 + GREENIUM_GAMMA * kappa * disclosed),
 
-        so fundamentalists accumulate green assets (which look structurally
-        undervalued at par) and distribute brown ones. For score == 0 the
-        multiplier is exactly 1.0 -- a bit-exact float identity -- and the
-        legacy valuation is untouched.
+        so fundamentalists no longer take the disclosure at face value:
+        kappa drifts up while no scandal occurs and collapses on detected
+        misreporting. Wedge suspicion: when the disclosed score rose with
+        no observable transition event, the sophisticated fraction applies
+        an additional WEDGE_SUSPICION_HAIRCUT to the score. For
+        score == 0 (legacy single-asset) every multiplier is exactly 1.0
+        -- a bit-exact float identity -- and the legacy valuation is
+        untouched.
 
         The relative mispricing m = (V - P) / V is compared with a corridor
         half-width that breathes with realised volatility. The probability
@@ -243,8 +393,11 @@ class Trader:
         """
         if v_fundamental <= 0.0 or current_price <= 0.0:
             return None
+        effective_score = credibility * green_score
+        if suspicious and self.sophisticated:
+            effective_score *= (1.0 - WEDGE_SUSPICION_HAIRCUT)
         v_green_fair = v_fundamental * (1.0 + self.GREENIUM_GAMMA
-                                        * green_score)
+                                        * effective_score)
 
         mispricing = (v_green_fair - current_price) / v_green_fair
         band = min(self.FUND_BAND_MAX,
@@ -274,12 +427,27 @@ class Trader:
                     current_price * (1.0 - 0.5 * band))
         return ('LIMIT', 'SELL', max(0.01, round(limit, 2)), qty)
 
-    def _decide_chartist(self, current_price: float, v_fundamental: float, ema_fast: float, ema_slow: float, ema_ready: bool, imbalance: float, rel_volatility: float, green_score: float = 0.0) -> Optional[tuple]:
+    def _decide_chartist(self, current_price: float, v_fundamental: float, ema_fast: float, ema_slow: float, ema_ready: bool, imbalance: float, rel_volatility: float, green_score: float = 0.0, credibility: float = 1.0, suspicious: bool = False) -> Optional[tuple]:
         """
         CONTRARIAN MEAN-REVERSION TRADER (Optimized)
         Invece di inseguire il trend in ritardo, vende i picchi e compra i minimi.
         Usa solo ordini limite passivi per incassare lo spread anziché pagarlo,
         ed è immune allo spoofing dei manipolatori.
+
+        Part G, WP3 -- verified asymmetry (no code change, by design):
+        chartists consume the disclosed score only THROUGH the price path
+        (EMA crossovers); they never read `green_score` directly. A
+        cheap-talk disclosure that moves prices (or a GreenManipulator
+        spoof wall that fakes pressure) is indistinguishable from genuine
+        news to this handler. HONESTY NOTE: this implementation is
+        contrarian (fades the trend with passive limits), so unlike the
+        canonical trend-chasing chartist it partially RESISTS
+        disclosure-ignited momentum instead of amplifying it -- the
+        classic "natural prey" role is carried mainly by the
+        imbalance-following noise crowd here; the chartist is prey only
+        when the induced move keeps running through its passive quotes.
+        `credibility` and `suspicious` are accepted for the uniform
+        handler signature and deliberately unused.
         """
         if not ema_ready:
             # Warm-up: rimaniamo fermi a accumulare liquidità invece di fare noise trading costoso
@@ -706,14 +874,35 @@ class GreenManipulator(Manipulator):
 
     @staticmethod
     def green_sentiment(asset, current_day: int) -> float:
-        """Green score plus news boosts for recent subsidy/transition."""
-        sentiment = asset.green_score
+        """
+        Narrative heat of an asset (Part G, WP2 re-pointing): the
+        DISCLOSED green score plus news boosts for a recent subsidy, a
+        recent real transition, and -- new -- a recent upward disclosure
+        revision, minus a double-weight penalty for a recent scandal.
+
+        Complementary-predator interaction (documented per WP2): the
+        greenwasher manipulates the SIGNAL (cheap-talk disclosure raises
+        `disclosed_green_score` and stamps `last_upgrade_day`), which is
+        exactly the surface this spoofer scans for targets; the spoofer
+        then manipulates the BOOK on the hottest narrative, amplifying
+        the price move the greenwasher's treasury sells into. A detected
+        scandal (WP1.5) kills the narrative for both: the disclosed score
+        snaps back to true AND the scandal penalty term pushes the asset
+        below the attack threshold for a full sentiment window.
+        """
+        sentiment = asset.disclosed_green_score
         if current_day - asset.last_subsidy_day \
                 <= GREEN_SENTIMENT_WINDOW_DAYS:
             sentiment += GREEN_SENTIMENT_EVENT_BOOST
         if current_day - asset.last_transition_day \
                 <= GREEN_SENTIMENT_WINDOW_DAYS:
             sentiment += GREEN_SENTIMENT_EVENT_BOOST
+        if current_day - asset.last_upgrade_day \
+                <= GREEN_SENTIMENT_WINDOW_DAYS:
+            sentiment += GREEN_SENTIMENT_EVENT_BOOST
+        if current_day - asset.last_scandal_day \
+                <= GREEN_SENTIMENT_WINDOW_DAYS:
+            sentiment -= 2.0 * GREEN_SENTIMENT_EVENT_BOOST
         return sentiment
 
     def act_green(self, venues: list, current_day: int) -> None:
