@@ -173,3 +173,157 @@ TAYLOR_RATE_CAP: Final[float] = 0.25
 # top of the raw green score when the spoofer picks its target.
 GREEN_SENTIMENT_WINDOW_DAYS: Final[int] = 60
 GREEN_SENTIMENT_EVENT_BOOST: Final[float] = 0.50
+
+# --------------------------------------------------------------------------- #
+# Part G -- Greenwashing under Directive (EU) 2026/470 ("Omnibus").
+# Strictly additive: everything below is inert unless
+# Simulation(enable_esg=True) and, for the regulatory blocks, the
+# enable_regulation=True sub-flag. Nothing above this line is referenced
+# or redefined here.
+# --------------------------------------------------------------------------- #
+
+# -- WP1: stylized regulatory layer (regulation.py) -------------------------- #
+# STYLIZATION (Art. 2(4), amending Art. 19a of 2013/34/EU): the directive
+# scopes mandatory sustainability reporting by net turnover (> EUR 450m)
+# and headcount (> 1000 employees). The simulation has neither payrolls
+# nor revenue statements, so firm size is proxied by the corporate
+# balance at listing and compared against this threshold analog.
+REG_MANDATORY_SIZE_THRESHOLD_DEC: Final[Decimal] = Decimal("2000000.00")
+REG_MANDATORY_SIZE_THRESHOLD: Final[float] = \
+    float(REG_MANDATORY_SIZE_THRESHOLD_DEC)
+
+# STYLIZATION (Art. 1(3) and recital 5): the Omnibus removes the escalation
+# to reasonable assurance; sustainability statements stay under *limited*
+# assurance. Modeled as a low-probability audit whose detection power is
+# logistic in the disclosed-vs-true wedge. The audit probability, slope
+# and midpoint are modeling choices calibrated to "low-power" review, not
+# numbers from the directive.
+REG_AUDIT_PROBABILITY: Final[float] = 0.25   # Per reporting period.
+REG_DETECT_STEEPNESS: Final[float] = 12.0    # Logistic slope in the wedge.
+REG_DETECT_MIDPOINT: Final[float] = 0.25     # Wedge with 50% detection.
+REG_WEDGE_TOLERANCE: Final[float] = 0.02     # Measurement noise floor.
+
+# STYLIZATION (Art. 2(4)(b)(iii)): commercial-prejudice / trade-secret /
+# security omissions let a firm lawfully withhold negative information.
+# Modeled as a per-firm rate damping *downward* revisions of the disclosed
+# score; the withheld portion accumulates in a capped lawful buffer that
+# audits must NOT count as misreporting.
+REG_OMISSION_RATE_DEFAULT: Final[float] = 0.30
+REG_OMISSION_BUFFER_CAP: Final[float] = 0.15
+
+# STYLIZATION (Art. 4(19), amending CSDDD Art. 27(4)): pecuniary sanctions
+# are capped at 3% of net worldwide turnover. The simulation has no income
+# statement, so turnover is proxied as a fixed multiple of the corporate
+# balance; the multiple is a modeling choice.
+REG_PENALTY_RATE_DEC: Final[Decimal] = Decimal("0.03")
+REG_PENALTY_RATE: Final[float] = float(REG_PENALTY_RATE_DEC)
+REG_TURNOVER_BALANCE_MULTIPLE_DEC: Final[Decimal] = Decimal("0.50")
+REG_TURNOVER_BALANCE_MULTIPLE: Final[float] = \
+    float(REG_TURNOVER_BALANCE_MULTIPLE_DEC)
+
+# STYLIZATION (recital 47): the Omnibus repeals the obligation to *adopt*
+# climate transition plans; firms only report plans they voluntarily have.
+# False = post-Omnibus regime (transition purely NPV-driven, WP5);
+# True  = pre-Omnibus counterfactual (no backsliding, forced minimum step).
+REG_TRANSITION_PLANS_MANDATORY: Final[bool] = False
+REG_MANDATED_MIN_STEP: Final[float] = 0.0005  # Counterfactual daily floor.
+
+# STYLIZATION (Art. 3 and Art. 5): phase-in / 2027 transposition. Before
+# this simulation day, audits and penalties are inactive and disclosure is
+# voluntary for everyone (pre-enforcement regime for policy experiments).
+REG_ENFORCEMENT_START_DAY: Final[int] = 240
+
+# STYLIZATION: the EU green-bond framework (Regulation (EU) 2023/2631) is
+# left in force by the Omnibus; this flag is purely the experiment lever
+# for the WP6 sovereign program, not a provision of Directive 2026/470.
+REG_GREEN_BONDS_ALLOWED: Final[bool] = True
+
+# Reporting cadence (aligned with the evolutionary epoch so disclosure,
+# subsidies and dividends share one corporate calendar).
+REG_REPORTING_PERIOD_DAYS: Final[int] = 60
+
+# -- WP2: greenwashing corporate agent (corporates.py) ----------------------- #
+# Cheap-talk disclosure: PR/reporting cost per inflation step, orders of
+# magnitude below the real GREEN_TRANSITION-scale CAPEX.
+GREENWASH_REPORT_COST_DEC: Final[Decimal] = Decimal("150.00")
+GREENWASH_REPORT_COST: Final[float] = float(GREENWASH_REPORT_COST_DEC)
+# Plausibility cap on per-period wedge growth (a firm cannot claim to have
+# gone from coal to carbon-neutral in one reporting period).
+GREENWASH_MAX_WEDGE_STEP: Final[float] = 0.10
+# Inflation-choice grid for the one-period expected-profit argmax.
+GREENWASH_CHOICE_GRID: Final[tuple] = (0.0, 0.02, 0.04, 0.06, 0.08, 0.10)
+# Adaptive-type risk dynamics (modeling choice, no directive basis):
+# after its own scandal an adaptive firm reports honestly for the memory
+# window, then re-enters the argmax with penalty aversion scaled up.
+ADAPTIVE_SCANDAL_MEMORY_DAYS: Final[int] = 180
+ADAPTIVE_RISK_AVERSION_STEP: Final[float] = 0.75
+
+# Corporate treasury stake (harvest channel a: insider/treasury sales into
+# the greenium). Shares held by the corporate ledger shell at listing and
+# sold in clips once the disclosed score commands a market premium.
+CORPORATE_TREASURY_SHARES: Final[int] = 1_000
+TREASURY_SELL_CLIP: Final[int] = 25          # Shares per reporting period.
+TREASURY_MIN_PREMIUM: Final[float] = 0.02    # Min price/fair gap to sell.
+# Fraction of incremental sovereign-fund buy flow the treasury is assumed
+# to capture through price impact when a disclosure crosses the
+# STATE_GREEN_THRESHOLD (structural parameter of the WP2 argmax; the flow
+# itself is always read from live State budgets).
+SOVEREIGN_FLOW_CAPTURE: Final[float] = 0.02
+
+# -- WP3: credibility beliefs (modeling choice, no directive basis) ---------- #
+CREDIBILITY_PRIOR: Final[float] = 0.60
+LAMBDA_TRUST: Final[float] = 0.08            # Per-epoch drift toward 1.
+SCANDAL_CREDIBILITY_SHOCK: Final[float] = 0.35   # Multiplier, own asset.
+SCANDAL_SECTOR_SPILLOVER: Final[float] = 0.90    # Multiplier, other assets.
+SOPHISTICATED_FRACTION: Final[float] = 0.30  # Wedge-suspicious fundamentalists.
+WEDGE_SUSPICION_HAIRCUT: Final[float] = 0.50 # Extra disclosed-score haircut.
+NOISE_CREDIBILITY_DILUTION: Final[float] = 0.50  # Noise traders' kappa dilution.
+NOISE_GREEN_TILT: Final[float] = 0.05        # Noise buy-probability green tilt.
+# Institutional reliance (WP3): the sovereign fund and the bank use the raw
+# disclosed score by default -- the deliberate private-belief/institutional
+# wedge. Toggle True for the counterfactual where institutions also
+# discount by market credibility.
+INSTITUTIONS_USE_CREDIBILITY: Final[bool] = False
+
+# -- WP4: heterogeneous mixed-strategy agents --------------------------------#
+WEIGHT_ADAPTATION_STEP: Final[float] = 0.25  # Bounded step toward target vertex.
+DIRICHLET_CONCENTRATION: Final[float] = 2.0  # Initial-weight concentration.
+
+# -- WP5: NPV-driven continuous, reversible transition ------------------------#
+# Price of green capital: log-space OU around a flat anchor (reuses the
+# Asset OU pattern; economy-wide, exogenous).
+PGREEN_INITIAL: Final[float] = 1.0
+PGREEN_LOG_REVERSION: Final[float] = 0.02
+PGREEN_LOG_VOL: Final[float] = 0.02
+NPV_HORIZON_DAYS: Final[int] = 250           # Myopic planning horizon H.
+TRANSITION_RESPONSIVENESS: Final[float] = 5e-8   # dg/dt per $ of NPV.
+G_STEP_MAX: Final[float] = 0.004             # Max daily true-score gain.
+G_DECAY_MAX: Final[float] = 0.002            # Max daily backsliding.
+# Convex marginal cost of real greenness (per unit of g, in $):
+#   C'(g) = GREEN_MC_BASE * (1 + GREEN_MC_CONVEXITY * g / (1.05 - g))
+# so the last 10% is disproportionately expensive.
+GREEN_MC_BASE_DEC: Final[Decimal] = Decimal("40000.00")
+GREEN_MC_BASE: Final[float] = float(GREEN_MC_BASE_DEC)
+GREEN_MC_CONVEXITY: Final[float] = 1.0
+GREEN_MC_POLE: Final[float] = 1.05           # Cost-curve pole (> 1).
+# Certification upkeep: daily cash cost per unit of true score. Backsliding
+# refunds nothing; only this maintenance saving is recovered.
+GREEN_MAINTENANCE_RATE_DEC: Final[Decimal] = Decimal("8.00")
+GREEN_MAINTENANCE_RATE: Final[float] = float(GREEN_MAINTENANCE_RATE_DEC)
+
+# -- WP6: sovereign green bonds -----------------------------------------------#
+GREEN_BOND_FACE_DEC: Final[Decimal] = Decimal("50000.00")
+GREEN_BOND_FACE: Final[float] = float(GREEN_BOND_FACE_DEC)
+GREEN_BOND_GREENIUM: Final[float] = 0.005    # Coupon discount vs policy rate.
+GREEN_BOND_MATURITY_DAYS: Final[int] = 365
+GREEN_BOND_COUPON_PERIOD_DAYS: Final[int] = 30
+# Issue when the treasury float mirror drops below this funding threshold.
+GREEN_BOND_ISSUE_THRESHOLD_DEC: Final[Decimal] = Decimal("2000000.00")
+GREEN_BOND_MAX_OUTSTANDING: Final[int] = 20
+
+# -- WP7: green-weighted bank reserve requirements ----------------------------#
+RESERVE_BASE_RATIO_DEC: Final[Decimal] = Decimal("0.10")
+RESERVE_BASE_RATIO: Final[float] = float(RESERVE_BASE_RATIO_DEC)
+GREEN_RISK_WEIGHT_DISCOUNT: Final[float] = 0.50  # "Green supporting factor".
+OMEGA_MIN: Final[float] = 0.20               # Risk-weight floor (> 0).
+GREEN_BOND_OMEGA: Final[float] = 0.25        # Reserve weight of green bonds.

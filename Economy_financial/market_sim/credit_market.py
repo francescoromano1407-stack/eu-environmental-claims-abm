@@ -57,6 +57,7 @@ from market_sim.constants import (
     CREDIT_MIN_LTV,
     CREDIT_UTILIZATION_ALPHA_DEC,
     MAINTENANCE_MARGIN_RATIO,
+    RESERVE_BASE_RATIO_DEC,
     MAX_DEBT_TO_EQUITY,
     MIN_COLLATERAL_SHARES,
     P2P_LENDER_MIN_CASH,
@@ -141,10 +142,23 @@ class CommercialBank:
     revolving credit against mark-to-market wealth, and absorbs default
     write-offs. The Decimal fields are the exact canon; `cash` is the
     float mirror participating in the system-wide cash conservation law.
+
+    Part G, WP7 -- green-weighted mandatory reserves ("green supporting
+    factor"): `required_reserves_dec` is recomputed daily by the
+    CreditMarket from the bank's exposures weighted by the DISCLOSED
+    green score of the backing asset (WP3 institutional reliance --
+    deliberate model risk: a successful greenwasher lowers MEASURED risk
+    while true risk is unchanged). Lending capacity becomes
+    `capital - RR` instead of raw capital: `can_fund` subtracts the
+    requirement, which is exactly zero (a Decimal identity) whenever the
+    regulation layer is off, so the legacy path is bit-identical.
     """
 
     __slots__ = ("bank_id", "cash", "cash_dec", "loans_outstanding_dec",
-                 "interest_income_dec", "writeoffs_dec")
+                 "interest_income_dec", "writeoffs_dec",
+                 # Part G, WP6 + WP7 state.
+                 "bond_holdings", "required_reserves_dec",
+                 "required_reserves", "reserve_shortfall_events")
 
     def __init__(self, capital_dec: Decimal = BANK_INITIAL_CAPITAL_DEC):
         self.bank_id = BANK_ID
@@ -153,9 +167,16 @@ class CommercialBank:
         self.loans_outstanding_dec = _ZERO
         self.interest_income_dec = _ZERO
         self.writeoffs_dec = _ZERO
+        self.bond_holdings: list = []        # GreenBond instruments (WP6)
+        self.required_reserves_dec = _ZERO   # WP7 Decimal canon
+        self.required_reserves = 0.0         # WP7 float mirror
+        self.reserve_shortfall_events = 0    # Systemic-risk audit counter
 
     def can_fund(self, amount_dec: Decimal) -> bool:
-        return self.cash_dec >= amount_dec
+        """Lending capacity net of required reserves (WP7). With the
+        regulation layer off the requirement is exactly Decimal 0 and
+        this reduces to the legacy `cash_dec >= amount_dec`."""
+        return self.cash_dec - self.required_reserves_dec >= amount_dec
 
     def pay_out(self, amount_dec: Decimal) -> float:
         """Disburses funds; returns the exact float leg of the transfer."""
@@ -272,6 +293,15 @@ class CreditMarket:
         # the original engine exactly.
         self.central_bank: Optional[CentralBank] = None
 
+        # Part G, WP7: optional regulation hookup, set by the Simulation
+        # in ESG+regulation mode. `esg_regulation` supplies the risk-
+        # weight schedule (single source of truth); `collateral_asset` is
+        # the asset backing margin collateral (the primary listing in
+        # this build). Both None => the reserve machinery never runs and
+        # required reserves stay exactly Decimal 0 (legacy-identical).
+        self.esg_regulation = None
+        self.collateral_asset = None
+
         # Audit counters (Decimal canon; cash legs mirror into the float
         # ledger as internal transfers, so system cash is unaffected).
         self.total_disbursed_dec = _ZERO
@@ -328,6 +358,54 @@ class CreditMarket:
                                 + CREDIT_UTILIZATION_ALPHA_DEC * util_dec)
         self.annual_rate = float(self.annual_rate_dec)
         self._daily_rate_dec = self.annual_rate_dec / _DAY_COUNT_DEC
+
+    # -- Part G, WP7: green-weighted mandatory reserves ------------------------#
+    def update_reserve_requirements(self) -> None:
+        """
+        Recomputes the bank's required reserves under the green
+        supporting factor:
+
+            RR = RESERVE_BASE_RATIO * [ sum_lines principal_i * omega_i
+                                        + sum_bonds face_j * omega_bond ]
+
+        with omega_i = max(OMEGA_MIN, 1 - discount * DISCLOSED score of
+        the collateral asset) supplied by the ESGRegulation (single
+        source of truth). Only bank-funded lines are bank exposures
+        (P2P receivables sit on lender wallets, not the bank book).
+
+        Deliberate model risk (WP7): omega uses the DISCLOSED score. On a
+        scandal the asset's disclosed score snaps back to true (WP1.5),
+        omega jumps on the next daily cycle, RR spikes, and `can_fund`
+        may refuse new originations -- the systemic amplification is
+        observable through `reserve_shortfall_events` and the exported
+        reserve series. All arithmetic stays in the Decimal canon with
+        float mirrors, consistent with the ledger style.
+        """
+        regulation = self.esg_regulation
+        bank = self.bank
+        if regulation is None:
+            return
+        asset = self.collateral_asset
+        omega = regulation.risk_weight(
+            asset.disclosed_green_score if asset is not None else 0.0)
+        omega_dec = Decimal(repr(round(omega, 9)))
+
+        exposure_dec = _ZERO
+        for line in self.lines.values():
+            if line.lender_id == BANK_ID:
+                exposure_dec += line.principal_dec
+        weighted_dec = exposure_dec * omega_dec
+
+        bond_omega_dec = Decimal(repr(round(regulation.green_bond_omega, 9)))
+        for bond in bank.bond_holdings:
+            weighted_dec += bond.face_dec * bond_omega_dec
+
+        rr_dec = (RESERVE_BASE_RATIO_DEC * weighted_dec).quantize(
+            CREDIT_CENT_DEC, rounding=ROUND_HALF_EVEN)
+        bank.required_reserves_dec = rr_dec
+        bank.required_reserves = float(rr_dec)
+        if rr_dec > bank.cash_dec:
+            bank.reserve_shortfall_events += 1
 
     # -- exact transfer primitives ------------------------------------------- #
     def _route_to_lender(self, line: CreditLine, amount_dec: Decimal,
@@ -447,6 +525,11 @@ class CreditMarket:
             self._accrue_and_service(current_day, trader_map)
             self._enforce_margins(closing_price, trader_map, current_day)
         self._refresh_p2p_vault(traders, market_maker)
+        # Part G, WP7: refresh the green-weighted reserve requirement
+        # BEFORE originations so today's lending capacity is capital - RR.
+        # No-op (and required reserves stay exactly 0) without regulation.
+        if self.esg_regulation is not None:
+            self.update_reserve_requirements()
         self._originate(current_day, closing_price, rel_volatility,
                         strategy_attractiveness, trader_map, traders)
 
@@ -642,3 +725,12 @@ class CreditMarket:
     def outstanding_debt(self) -> float:
         """Float mirror of total outstanding principal (O(1))."""
         return float(self.total_principal_dec)
+
+    def bank_exposure(self) -> float:
+        """Bank-funded principal only (P2P receivables excluded) -- the
+        exposure base of the WP7 reserve requirement. O(lines)."""
+        total = _ZERO
+        for line in self.lines.values():
+            if line.lender_id == BANK_ID:
+                total += line.principal_dec
+        return float(total)

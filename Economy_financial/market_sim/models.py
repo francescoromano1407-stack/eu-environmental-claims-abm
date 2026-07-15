@@ -18,11 +18,14 @@ import math
 import random
 from typing import Optional
 
+from decimal import Decimal
+
 from market_sim.constants import (
     BASE_COMMISSION_RATE,
     CORPORATE_BALANCE_FLOOR,
     GREEN_CAPEX_FACTOR,
     LOG_CORPORATE_BALANCE_FLOOR,
+    REG_OMISSION_RATE_DEFAULT,
 )
 
 # Bounded history horizon: price/balance histories are capped so unbounded
@@ -98,6 +101,34 @@ class Asset:
     expose the nominal `balance`. External writes to `balance` (dividend
     deductions) re-sync the log state through the property setter, which is
     the only remaining `math.log()` site and runs once per dividend event.
+
+    Part G, WP1.2 -- the single Part F `green_score` is split into:
+
+      `true_green_score`       Drives real cash flows: CAPEX actually
+                               spent (WP5 transition machinery and the
+                               historical GREEN_CAPEX_FACTOR listing
+                               penalty), certification maintenance, and
+                               what an audit measures.
+      `disclosed_green_score`  Drives market perception: the greenium
+                               (traders, WP3), sovereign-fund eligibility
+                               and subsidy allocation (State), bank risk
+                               weights (WP7), green-bond spillovers (WP6),
+                               and the GreenManipulator's sentiment.
+
+    Re-pointing decisions for every legacy consumer of `green_score`:
+      - `Trader._decide_fundamentalist` greenium  -> DISCLOSED (perception)
+      - `Trader._decide_noise` green tilt (new)   -> DISCLOSED (perception)
+      - `State.pay_subsidies` allocation          -> DISCLOSED (WP2.b exploit)
+      - `State.invest_green` eligibility          -> DISCLOSED (WP3 reliance)
+      - `GreenManipulator.green_sentiment`        -> DISCLOSED (narrative)
+      - `CommercialBank` reserve weights (WP7)    -> DISCLOSED (model risk)
+      - `GREEN_CAPEX_FACTOR` listing penalty      -> TRUE (real CAPEX spent)
+      - WP5 NPV transition dynamics / maintenance -> TRUE (physical state)
+      - Audits (`ESGRegulation`)                  -> compare DISCLOSED vs TRUE
+    The legacy `green_score` property remains as a read alias of the
+    DISCLOSED score (everything a market participant can observe); with
+    the regulation layer off the two scores are identical by construction,
+    so pre-Part-G behavior is preserved.
     """
 
     def __init__(self, symbol: str, initial_price: float = 100.0,
@@ -105,19 +136,37 @@ class Asset:
                  fundamental_drift: float = 0.00010,
                  fundamental_reversion: float = 0.015,
                  fundamental_vol: float = 0.005,
-                 green_score: float = 0.0):
+                 green_score: float = 0.0,
+                 firm_size: Optional[float] = None,
+                 omission_rate: float = REG_OMISSION_RATE_DEFAULT):
         self.symbol = symbol
-        # Part F: sustainability profile in [0, 1] (0 = brown, 1 = green).
-        # Externally read-only; it moves only through the controlled
-        # `apply_green_transition` corporate mechanism.
-        self._green_score = min(1.0, max(0.0, float(green_score)))
+        # Part F / Part G: sustainability profile in [0, 1]. At listing the
+        # disclosed score equals the true score (no wedge yet); the wedge
+        # can only open through CorporatePolicy disclosure (WP2).
+        score = min(1.0, max(0.0, float(green_score)))
+        self._true_green_score = score
+        self._disclosed_green_score = score
         self.last_subsidy_day = -10**9      # Set by the State layer.
-        self.last_transition_day = -10**9   # Set by apply_green_transition.
+        self.last_transition_day = -10**9   # Set by real transitions (WP5).
+        self.last_disclosure_day = -10**9   # Set by CorporatePolicy (WP2).
+        self.last_upgrade_day = -10**9      # Set when a disclosure RAISES d.
+        self.last_scandal_day = -10**9      # Set on audit detection (WP1.5).
+        # WP1.4 -- lawful omission state: fraction of downward revisions a
+        # firm may withhold, and the capped buffer of lawfully omitted
+        # score that audits must not count as misreporting.
+        self.omission_rate = omission_rate
+        self.lawful_omission = 0.0
         # Historical capital penalty: pre-listing sustainable CAPEX
-        # structurally reduces the opening balance sheet. Exactly neutral
-        # for green_score == 0 (multiplier 1.0 is an exact float identity).
+        # structurally reduces the opening balance sheet. Re-pointed to the
+        # TRUE score (WP1.2): only real CAPEX shrinks a balance sheet.
+        # Exactly neutral for score == 0 (multiplier 1.0 is exact).
         initial_balance = initial_balance \
-            * (1.0 - GREEN_CAPEX_FACTOR * self._green_score)
+            * (1.0 - GREEN_CAPEX_FACTOR * self._true_green_score)
+        # WP1.1 -- firm size proxy (STYLIZATION: the directive scopes by
+        # net turnover and headcount; the simulation proxies both with the
+        # corporate balance at listing, overridable per asset_profile).
+        self.firm_size = float(firm_size) if firm_size is not None \
+            else initial_balance
         self.price_history: collections.deque = collections.deque(
             [initial_price], maxlen=HISTORY_MAXLEN)
         self.balance_history: collections.deque = collections.deque(
@@ -131,20 +180,72 @@ class Asset:
 
     @property
     def green_score(self) -> float:
-        """Sustainability score in [0, 1]; mutate via apply_green_transition."""
-        return self._green_score
+        """Legacy alias: what the market can observe is the DISCLOSED
+        score (WP1.2). Identical to the true score while no wedge exists."""
+        return self._disclosed_green_score
+
+    @property
+    def true_green_score(self) -> float:
+        """Physical sustainability state; moves only through real CAPEX
+        (WP5 continuous dynamics or the legacy transition step)."""
+        return self._true_green_score
+
+    @property
+    def disclosed_green_score(self) -> float:
+        """Reported sustainability; moves only through CorporatePolicy
+        disclosure (WP2) or a scandal reset (WP1.5)."""
+        return self._disclosed_green_score
+
+    @property
+    def wedge(self) -> float:
+        """Raw disclosed-minus-true gap (>= 0 for inflating firms)."""
+        return self._disclosed_green_score - self._true_green_score
+
+    @property
+    def unlawful_wedge(self) -> float:
+        """The audit-relevant wedge: the raw gap net of the lawful
+        omission buffer (WP1.4), floored at zero."""
+        gap = self.wedge - self.lawful_omission
+        return gap if gap > 0.0 else 0.0
 
     def apply_green_transition(self, increment: float, cost: float,
                                current_day: int) -> None:
         """
-        Executes one corporate Green Transition Step: pays `cost` out of
+        Executes one REAL corporate transition step: pays `cost` out of
         the balance sheet (the property setter keeps the log-space OU
-        state in sync) and permanently raises the green score. The caller
-        is responsible for the solvency-floor check.
+        state in sync) and permanently raises the TRUE green score. The
+        caller is responsible for the solvency-floor check. The disclosed
+        score follows in lock-step here (a real, announced improvement);
+        strategic divergence happens only in CorporatePolicy.disclose().
         """
         self.balance -= cost
-        self._green_score = min(1.0, self._green_score + increment)
+        self._true_green_score = min(
+            1.0, self._true_green_score + increment)
+        if self._disclosed_green_score < self._true_green_score:
+            self._disclosed_green_score = self._true_green_score
         self.last_transition_day = current_day
+
+    def set_true_score(self, value: float) -> None:
+        """WP5 continuous-dynamics write path for the physical score."""
+        self._true_green_score = min(1.0, max(0.0, value))
+
+    def set_disclosed_score(self, value: float, current_day: int) -> None:
+        """WP2 disclosure write path for the reported score. Upward
+        revisions additionally stamp `last_upgrade_day` -- the "hot
+        narrative" signal the GreenManipulator and the WP3 wedge-suspicion
+        check both consume."""
+        value = min(1.0, max(0.0, value))
+        if value > self._disclosed_green_score:
+            self.last_upgrade_day = current_day
+        self._disclosed_green_score = value
+        self.last_disclosure_day = current_day
+
+    def apply_scandal(self, current_day: int) -> None:
+        """WP1.5 forced reset on detection: disclosed := true, lawful
+        omission buffer wiped, scandal timestamp marked."""
+        self._disclosed_green_score = self._true_green_score
+        self.lawful_omission = 0.0
+        self.last_scandal_day = current_day
 
     # `balance` is a property so external mutations (dividend payouts) keep
     # the log-space OU state consistent without any log() in the daily loop.
@@ -290,6 +391,43 @@ class AssetPosition:
         return (f"AssetPosition(owner={self.owner.trader_id}, "
                 f"shares={self.shares}, reserved={self.shares_reserved}, "
                 f"collateral={self.shares_collateral})")
+
+
+class GreenBond:
+    """
+    Sovereign green bond (Part G, WP6). `__slots__` value object.
+
+    Issued at par by the `State` under the EU green-bond framework
+    stylization (Regulation (EU) 2023/2631, left in force by the Omnibus
+    directive). The Decimal face value is the accounting canon; `face` is
+    the float mirror used in hot-loop reserve arithmetic (WP7). The
+    use-of-proceeds tag documents the earmarking constraint enforced by
+    the State's `green_proceeds_dec` sub-ledger.
+    """
+
+    __slots__ = ("bond_id", "holder_id", "face_dec", "face", "coupon_rate",
+                 "issue_day", "maturity_day", "use_of_proceeds",
+                 "coupons_paid_dec", "rolled", "active")
+
+    def __init__(self, bond_id: int, holder_id: str, face_dec: Decimal,
+                 coupon_rate: float, issue_day: int, maturity_day: int,
+                 use_of_proceeds: str = "green_subsidies_and_fund"):
+        self.bond_id = bond_id
+        self.holder_id = holder_id          # Buyer trader_id or 'BANK'
+        self.face_dec = face_dec
+        self.face = float(face_dec)         # Hot-loop float mirror (WP7 RR)
+        self.coupon_rate = coupon_rate      # Annual; policy rate - greenium
+        self.issue_day = issue_day
+        self.maturity_day = maturity_day
+        self.use_of_proceeds = use_of_proceeds
+        self.coupons_paid_dec = Decimal("0")
+        self.rolled = 0                     # Sovereign-stress roll count
+        self.active = True
+
+    def __repr__(self) -> str:
+        return (f"GreenBond(id={self.bond_id}, holder={self.holder_id}, "
+                f"face={self.face_dec}, coupon={self.coupon_rate:.4f}, "
+                f"maturity={self.maturity_day})")
 
 
 class IncrementalEMA:
