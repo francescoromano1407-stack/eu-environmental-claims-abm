@@ -10,9 +10,15 @@ Package layout
   constants.py   Microstructural constants: friction floors, solvency
                  floors, LOB decay hazard bounds, evolutionary epoch
                  config, Part G regulatory/greenwashing parameters.
-  regulation.py  ESGRegulation: stylized Directive (EU) 2026/470 policy
-                 object (Part G, WP1) -- single source of truth queried
-                 by every other layer.
+  regulation.py  Calendar-aware LegalRegime plus the retained legacy
+                 ESGRegulation policy experiment.
+  environmental_claims.py  Typed facts, claims, evidence, assessments and
+                 information-safe public/investor signals.
+  greenwashing_supervision.py  Assurance, consumer/reporting/market rule
+                 tracks, finite-capacity cases, remedies and sanctions.
+  consumer_market.py  Heterogeneous consumer beliefs, logit demand and the
+                 external real-economy ledger.
+  workforce.py   Employee trust, bounded productivity and turnover.
   models.py      Data primitives: LimitOrder / MarketOrder (__slots__),
                  Asset (log-space OU fundamental; true vs disclosed
                  green score split, Part G), GreenBond (__slots__, WP6),
@@ -102,13 +108,15 @@ PART D -- Fluid friction and probabilistic LOB decay
      smoothly instead of building week-long artificial walls that all
      expire at once.
 
-PART G -- Greenwashing under Directive (EU) 2026/470 ("Omnibus")
------------------------------------------------------------------
+PART G -- Legacy ESG experiments and opt-in EU greenwashing supervision
+----------------------------------------------------------------------
 The ESG layer is reoriented around greenwashing as the central research
-object. Every mechanism is gated behind Simulation(enable_esg=True) --
-regulatory blocks additionally behind enable_regulation=True -- and is
-provably inert otherwise (the seed-42 legacy trajectory is bit-for-bit
-unchanged with the flags off).
+object. The current prevention layer is gated behind
+``Simulation(enable_greenwashing_supervision=True)`` and is inert otherwise.
+It combines the base UCPD, Directive (EU) 2024/825, amended CSRD rules,
+separate financial-market communication rules and CSDDD due diligence; no
+single directive is treated as a complete greenwashing code.  The historical
+WP1-WP7 mechanics below remain available as legacy policy experiments.
 
   WP1  Regulatory layer (`regulation.py`): stylized Directive (EU)
        2026/470. Size-scoped mandatory disclosure (Art. 2(4); balance
@@ -209,6 +217,25 @@ from market_sim.credit_market import (
     CreditLine,
     CreditMarket,
 )
+from market_sim.consumer_market import (
+    ConsumerMarket,
+    ConsumerMarketLedger,
+    ConsumerSegment,
+)
+from market_sim.environmental_claims import (
+    AssessmentOutcome,
+    ClaimAssessment,
+    EnvironmentalClaim,
+    EnvironmentalFactVector,
+    EvidenceRecord,
+    FirmProfile,
+    InvestorEnvironmentalContext,
+)
+from market_sim.greenwashing_supervision import (
+    GreenwashingSupervisor,
+    RegulatoryCase,
+    SupervisionParameters,
+)
 from market_sim.models import (
     Asset,
     AssetPosition,
@@ -218,10 +245,36 @@ from market_sim.models import (
     MarketOrder,
 )
 from market_sim.order_book import OrderBook
-from market_sim.regulation import ESGRegulation
+from market_sim.policy_comparison import (
+    HorizonGridResult,
+    PolicyComparisonReport,
+    PolicyOutcomeEvaluator,
+    PolicyScoreWeights,
+    SensitivityResult,
+    run_greenwashing_policy_comparison,
+    run_horizon_grid,
+    run_sensitivity_analysis,
+)
+from market_sim.policy_regimes import (
+    CertifiedGreenDataConnector,
+    ConnectorAuthorizationState,
+    ConnectorParameters,
+    DataSourceKind,
+    GreenwashingPolicyRegime,
+    PrescreeningParameters,
+    PrescreeningParticipationMode,
+    ReconciliationClass,
+    SMEPrescreeningHub,
+    export_connector_ledgers,
+    export_prescreening_ledger,
+)
+from market_sim.regulation import ESGRegulation, LegalRegime
 from market_sim.simulation import (
     MarketVenue,
     Simulation,
+    export_claim_audit_log,
+    export_correction_events,
+    export_regulatory_cases,
     export_simulation_metrics,
 )
 from market_sim.state_intervention import State
@@ -231,16 +284,31 @@ from market_sim.traders import (
     MarketMaker,
     Trader,
 )
+from market_sim.workforce import WorkforceState
 
 __all__ = [
     "Asset",
     "AssetPosition",
     "CentralBank",
     "CommercialBank",
+    "ConsumerMarket",
+    "ConsumerMarketLedger",
+    "ConsumerSegment",
     "CorporatePolicy",
     "CreditLine",
     "CreditMarket",
     "ESGRegulation",
+    "LegalRegime",
+    "EnvironmentalClaim",
+    "EnvironmentalFactVector",
+    "EvidenceRecord",
+    "ClaimAssessment",
+    "AssessmentOutcome",
+    "FirmProfile",
+    "InvestorEnvironmentalContext",
+    "GreenwashingSupervisor",
+    "RegulatoryCase",
+    "SupervisionParameters",
     "GreenBond",
     "GreenCapitalPrice",
     "GreenManipulator",
@@ -254,7 +322,31 @@ __all__ = [
     "Simulation",
     "State",
     "Trader",
+    "WorkforceState",
+    # Part H: three-regime State-intervention comparison.
+    "CertifiedGreenDataConnector",
+    "ConnectorAuthorizationState",
+    "ConnectorParameters",
+    "DataSourceKind",
+    "GreenwashingPolicyRegime",
+    "PolicyComparisonReport",
+    "PolicyOutcomeEvaluator",
+    "PolicyScoreWeights",
+    "PrescreeningParameters",
+    "PrescreeningParticipationMode",
+    "ReconciliationClass",
+    "SMEPrescreeningHub",
+    "run_greenwashing_policy_comparison",
+    "run_horizon_grid",
+    "run_sensitivity_analysis",
+    "HorizonGridResult",
+    "SensitivityResult",
+    "export_connector_ledgers",
+    "export_prescreening_ledger",
+    "export_claim_audit_log",
+    "export_correction_events",
+    "export_regulatory_cases",
     "export_simulation_metrics",
 ]
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
