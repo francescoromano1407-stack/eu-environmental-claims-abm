@@ -33,6 +33,7 @@ import collections
 import csv
 import math
 import random
+from datetime import date
 from typing import Optional
 
 from decimal import Decimal
@@ -55,9 +56,11 @@ from market_sim.constants import (
     ORDER_DECAY_BASE_HAZARD,
     ORDER_DECAY_MAX_HAZARD,
     REG_REPORTING_PERIOD_DAYS,
+    REVERIFICATION_RELATIVE_ERROR,
     SCANDAL_CREDIBILITY_SHOCK,
     SCANDAL_SECTOR_SPILLOVER,
     SOPHISTICATED_FRACTION,
+    SOURCE_REVERIFICATION_DELAY_DAYS,
     STATE_DAILY_INVESTMENT,
     STATE_GREEN_THRESHOLD,
     STATE_SUBSIDY_EPOCH_BUDGET_DEC,
@@ -68,6 +71,12 @@ from market_sim.constants import (
     WEIGHT_ADAPTATION_STEP,
 )
 from market_sim.corporates import CorporatePolicy, GreenCapitalPrice
+from market_sim.corporate_communications import CorporateCommunicationsPolicy
+from market_sim.consumer_market import (
+    ConsumerMarket,
+    DEFAULT_CONSUMER_SEGMENTS,
+)
+from market_sim.greenwashing_supervision import SupervisionParameters
 from market_sim.credit_market import CentralBank, CommercialBank, CreditMarket
 from market_sim.models import (
     Asset,
@@ -76,8 +85,24 @@ from market_sim.models import (
     LimitOrder,
     MarketOrder,
 )
+from market_sim.environmental_claims import (
+    AssessmentOutcome,
+    ClaimSubject,
+    EvidenceRecord,
+    EvidenceSource,
+    FirmProfile,
+    InvestorEnvironmentalContext,
+)
 from market_sim.order_book import OrderBook
-from market_sim.regulation import ESGRegulation
+from market_sim.policy_regimes import (
+    CertifiedGreenDataConnector,
+    ConnectorParameters,
+    GreenwashingPolicyRegime,
+    PrescreeningParameters,
+    SMEPrescreeningHub,
+)
+from market_sim.regulation import ESGRegulation, LegalRegime
+from market_sim.greenwashing_supervision import GreenwashingSupervisor
 from market_sim.state_intervention import STATE_ID, State
 from market_sim.traders import (
     GreenManipulator,
@@ -92,12 +117,16 @@ from market_sim.traders import (
 # valid (strategy defaults to 'honest', firm size to the balance proxy).
 # Overridable via Simulation(asset_profiles=...).
 DEFAULT_ESG_PROFILES = (
-    ("BRN1", 0.05, "greenwasher"), ("BRN2", 0.15, "adaptive"),
-    ("BRN3", 0.25, "honest"),
-    ("MID1", 0.35, "greenwasher"), ("MID2", 0.45, "honest"),
-    ("MID3", 0.55, "adaptive"), ("MID4", 0.65, "honest"),
-    ("GRN1", 0.75, "honest"), ("GRN2", 0.85, "greenwasher"),
-    ("GRN3", 0.95, "honest"),
+    FirmProfile("BRN1", 0.05, "greenwasher", 600_000_000, 1500),
+    FirmProfile("BRN2", 0.15, "adaptive", 520_000_000, 1200),
+    FirmProfile("BRN3", 0.25, "honest", 400_000_000, 1300),
+    FirmProfile("MID1", 0.35, "greenwasher", 700_000_000, 900),
+    FirmProfile("MID2", 0.45, "honest", 480_000_000, 1100),
+    FirmProfile("MID3", 0.55, "adaptive", 300_000_000, 700),
+    FirmProfile("MID4", 0.65, "honest", 900_000_000, 2500),
+    FirmProfile("GRN1", 0.75, "honest", 550_000_000, 1600),
+    FirmProfile("GRN2", 0.85, "greenwasher", 800_000_000, 2100),
+    FirmProfile("GRN3", 0.95, "honest", 350_000_000, 800),
 )
 
 
@@ -116,7 +145,13 @@ class MarketVenue:
                  # Part G: corporate policy agent and disclosed/true series
                  # (log_green_score keeps logging the DISCLOSED score --
                  # the legacy alias -- so downstream tooling stays valid).
-                 "policy", "log_true_score")
+                 "policy", "communications", "log_true_score",
+                 "log_supported_score", "log_greenhushing_gap",
+                 "log_employee_trust", "log_productivity", "log_turnover",
+                 "log_employees", "log_consumer_revenue",
+                 "log_consumer_gap", "log_claims", "log_cases",
+                 "log_real_environmental_spend",
+                 "log_communication_spend", "log_evidence_spend")
 
     def __init__(self, symbol: str, initial_price: float):
         self.symbol = symbol
@@ -136,7 +171,21 @@ class MarketVenue:
         self.log_price: list[float] = []
         self.log_balance: list[float] = []
         self.policy: Optional[CorporatePolicy] = None   # Part G, WP2/WP5
+        self.communications: Optional[CorporateCommunicationsPolicy] = None
         self.log_true_score: list[float] = []
+        self.log_supported_score: list[float] = []
+        self.log_greenhushing_gap: list[float] = []
+        self.log_employee_trust: list[float] = []
+        self.log_productivity: list[float] = []
+        self.log_turnover: list[float] = []
+        self.log_employees: list[float] = []
+        self.log_consumer_revenue: list[float] = []
+        self.log_consumer_gap: list[float] = []
+        self.log_claims: list[int] = []
+        self.log_cases: list[int] = []
+        self.log_real_environmental_spend: list[float] = []
+        self.log_communication_spend: list[float] = []
+        self.log_evidence_spend: list[float] = []
 
 
 class Simulation:
@@ -152,7 +201,28 @@ class Simulation:
                  asset_profiles: Optional[list] = None,
                  enable_regulation: bool = False,
                  regulation: Optional[ESGRegulation] = None,
-                 mixture_init: str = 'dirichlet'):
+                 mixture_init: str = 'dirichlet',
+                 enable_greenwashing_supervision: bool = False,
+                 start_date: date = date(2026, 1, 1),
+                 legal_regime: Optional[LegalRegime] = None,
+                 supervision_seed: int = 104729,
+                 consumer_daily_budget: float = 1000.0,
+                 greenwashing_policy_regime: GreenwashingPolicyRegime =
+                 GreenwashingPolicyRegime.CURRENT_EU_SUPERVISION,
+                 prescreening_parameters: Optional[
+                     PrescreeningParameters] = None,
+                 connector_parameters: Optional[
+                     ConnectorParameters] = None,
+                 supervision_parameters: Optional[
+                     "SupervisionParameters"] = None,
+                 regulatory_strictness: float = 0.55,
+                 consumer_preference_scale: float = 1.0,
+                 consumer_discrepancy_sensitivity: float = 1.0,
+                 workforce_trust_loss_rate: Optional[float] = None,
+                 workforce_trust_recovery_rate: Optional[float] = None,
+                 compliance_burden_scale: float = 1.0,
+                 investor_sophisticated_fraction: Optional[float] = None,
+                 investor_controversy_scale: float = 1.0):
         """
         Part G flags (all inert unless enable_esg=True, preserving the
         seed-42 legacy trajectory bit-for-bit):
@@ -176,6 +246,120 @@ class Simulation:
         self.initial_cash = initial_cash
         self.initial_shares = initial_shares
         self.initial_price = initial_price
+        self.start_date = start_date
+        self.legal_regime = legal_regime or LegalRegime(
+            simulation_start_date=start_date)
+        self.enable_greenwashing_supervision = bool(
+            enable_greenwashing_supervision)
+        self.supervision_seed = int(supervision_seed)
+        self.consumer_daily_budget = max(0.0, float(consumer_daily_budget))
+        # Dedicated local streams: adding the opt-in layer does not consume
+        # draws from the legacy module-level RNG sequence.
+        self._communications_rng = random.Random(self.supervision_seed + 11)
+        self._assurance_rng = random.Random(self.supervision_seed + 23)
+        self._supervisor_rng = random.Random(self.supervision_seed + 37)
+        self._consumer_rng = random.Random(self.supervision_seed + 53)
+        self._workforce_rng = random.Random(self.supervision_seed + 71)
+        # Part H: POLICY-SPECIFIC streams. Constructed unconditionally so
+        # every experimental arm holds identical stream objects, but drawn
+        # from only inside regime-gated branches -- the baseline arm and
+        # the shared streams above stay perfectly aligned across arms
+        # (common random numbers, Section 2/7 of the Part H spec).
+        self._prescreening_rng = random.Random(self.supervision_seed + 89)
+        self._connector_rng = random.Random(self.supervision_seed + 97)
+        # Part J (Workstream C): dedicated stream for source
+        # re-verification measurements. Constructed unconditionally (so
+        # every experimental arm holds identical stream objects) but drawn
+        # from only when a conflict investigation commissions a
+        # re-measurement.
+        self._reverification_rng = random.Random(self.supervision_seed + 131)
+        self._pending_reverifications: list[tuple[int, str, ClaimSubject]] = []
+        self._reverification_sequence = 0
+
+        # Part H: three-regime State-intervention comparison. The default
+        # keeps the CURRENT system as the ONLY active mechanism -- both
+        # proposed instruments are opt-in policy experiments layered on
+        # top of (never replacing) the legal rule engine.
+        self.policy_regime = GreenwashingPolicyRegime(
+            greenwashing_policy_regime)
+        if self.policy_regime \
+                != GreenwashingPolicyRegime.CURRENT_EU_SUPERVISION \
+                and not self.enable_greenwashing_supervision:
+            raise ValueError(
+                "Regimes B/C complement the EU supervision baseline; "
+                "enable_greenwashing_supervision=True is required for a "
+                "non-baseline greenwashing_policy_regime.")
+        _hub_regimes = {
+            GreenwashingPolicyRegime.SME_ALGORITHMIC_PRESCREENING,
+            GreenwashingPolicyRegime.HYBRID_PRESCREENING_AND_CONNECTOR,
+        }
+        _connector_regimes = {
+            GreenwashingPolicyRegime.CERTIFIED_GREEN_DATA_CONNECTOR,
+            GreenwashingPolicyRegime.HYBRID_PRESCREENING_AND_CONNECTOR,
+        }
+        self.prescreening_hub = SMEPrescreeningHub(prescreening_parameters) \
+            if self.policy_regime in _hub_regimes else None
+        self.green_data_connector = CertifiedGreenDataConnector(
+            connector_parameters) \
+            if self.policy_regime in _connector_regimes else None
+        # EXPERIMENT, normalized [0, 1]; constructor-injectable for the
+        # Part I.8 sensitivity interface (default preserves behaviour).
+        self.regulatory_strictness = float(regulatory_strictness)
+        # Part J -- additional global-sensitivity levers. Every default
+        # preserves the pre-Part-J behaviour exactly (see
+        # parameter_registry.py for classification and ranges).
+        self.compliance_burden_scale = max(0.0, float(
+            compliance_burden_scale))
+        self.investor_controversy_scale = max(0.0, float(
+            investor_controversy_scale))
+        self._sophisticated_fraction = SOPHISTICATED_FRACTION \
+            if investor_sophisticated_fraction is None \
+            else min(1.0, max(0.0, float(investor_sophisticated_fraction)))
+        self._workforce_trust_loss_rate = workforce_trust_loss_rate
+        self._workforce_trust_recovery_rate = workforce_trust_recovery_rate
+        self.claim_log = []
+        self.evidence_log = []
+        self.regulatory_case_log = []
+        # Research-only ground-truth ledger. It is never passed to an agent,
+        # assurance provider or supervisor and exists solely for ex-post
+        # false-positive/false-negative metrics.
+        self._evaluation_truth_by_claim: dict[str, float] = {}
+        # Research-only intent ledger (Part I.7): the deliberate
+        # overstatement component of the communication decision behind
+        # each claim. Same quarantine as the truth ledger -- ex-post
+        # evaluator use only, so measurement noise, material divergence
+        # and strategic misleading conduct can be separated honestly.
+        self._evaluation_intent_by_claim: dict[str, float] = {}
+        self.greenwashing_supervisor = GreenwashingSupervisor(
+            self.legal_regime, self._supervisor_rng,
+            parameters=supervision_parameters) \
+            if self.enable_greenwashing_supervision else None
+        if self.greenwashing_supervisor is not None:
+            # Part J (Workstream C): the supervisor can ask a SOURCE to
+            # re-measure during a conflict investigation. The Simulation
+            # owns the physical ledger and routes the request either to
+            # the connector's register-correction lifecycle or to a
+            # stylized third-party re-measurement apparatus.
+            self.greenwashing_supervisor.reverification_service = \
+                self._request_reverification
+        # Part I.8 sensitivity lever: consumer environmental-preference
+        # scale (1.0 = the unchanged default segments).
+        consumer_segments = DEFAULT_CONSUMER_SEGMENTS
+        if consumer_preference_scale != 1.0:
+            from market_sim.consumer_market import ConsumerSegment
+            consumer_segments = tuple(
+                ConsumerSegment(
+                    segment.name, segment.population_share,
+                    segment.attention,
+                    max(0.0, min(1.0, segment.environmental_preference
+                                 * consumer_preference_scale)),
+                    segment.sophistication, segment.memory,
+                    segment.price_sensitivity)
+                for segment in DEFAULT_CONSUMER_SEGMENTS)
+        self.consumer_market = ConsumerMarket(
+            self.consumer_daily_budget, consumer_segments,
+            discrepancy_sensitivity=consumer_discrepancy_sensitivity) \
+            if self.enable_greenwashing_supervision else None
 
         self.traders: list[Trader] = []          # Evolutionary population only
         self.trader_map: dict[str, Trader] = {}  # ALL participants (incl. MM)
@@ -188,7 +372,8 @@ class Simulation:
         self.central_bank: Optional[CentralBank] = None
         self.total_subsidies_paid = 0.0
         self.green_transitions = 0
-        self._multi_asset = bool(enable_esg or asset_profiles is not None)
+        self._multi_asset = bool(enable_esg or asset_profiles is not None
+                                 or self.enable_greenwashing_supervision)
 
         # Part G defaults (all None/off => provably inert; the attributes
         # exist on every Simulation so gated call sites stay branch-only).
@@ -196,7 +381,9 @@ class Simulation:
         self.green_capital: Optional[GreenCapitalPrice] = None
         self._mixtures_active = False
         self._mixture_init = mixture_init
-        self._enable_regulation = bool(enable_regulation and enable_esg)
+        self._enable_regulation = bool(
+            (enable_regulation and enable_esg)
+            or self.enable_greenwashing_supervision)
         self._injected_regulation = regulation
         self.total_treasury_sweeps = 0.0     # Conservation audit accumulator
 
@@ -217,7 +404,21 @@ class Simulation:
             # replaced by the venue-based ecosystem; nothing else runs.
             self._init_multi_asset(
                 list(asset_profiles or DEFAULT_ESG_PROFILES), num_traders,
-                num_manipulators, enable_credit, enable_esg)
+                num_manipulators, enable_credit,
+                bool(enable_esg or self.enable_greenwashing_supervision))
+            # Part J sensitivity levers: workforce trust dynamics
+            # (STYLIZATION defaults preserved when the arguments are None).
+            if self.venues is not None and (
+                    self._workforce_trust_loss_rate is not None
+                    or self._workforce_trust_recovery_rate is not None):
+                for venue in self.venues:
+                    workforce = venue.asset.workforce
+                    if self._workforce_trust_loss_rate is not None:
+                        workforce.trust_loss_rate = max(
+                            0.0, float(self._workforce_trust_loss_rate))
+                    if self._workforce_trust_recovery_rate is not None:
+                        workforce.trust_recovery_rate = max(
+                            0.0, float(self._workforce_trust_recovery_rate))
             return
 
         # Seed the evolutionary population in three equal cohorts.
@@ -333,16 +534,19 @@ class Simulation:
             if self._mixture_init != 'off':
                 self._mixtures_active = True
 
-        # Profile normalization: (symbol, score[, strategy[, firm_size]]).
+        # Profile normalization accepts explicit FirmProfile objects and the
+        # legacy (symbol, score[, strategy[, firm_size]]) tuple contract.
+        self._firm_profiles: dict[str, FirmProfile] = {}
         self._green_profiles = {}
         self._strategy_profiles = {}
         self._size_profiles = {}
         for entry in profiles:
-            sym, score = entry[0], entry[1]
-            self._green_profiles[sym] = score
-            self._strategy_profiles[sym] = entry[2] if len(entry) > 2 \
-                else 'honest'
-            self._size_profiles[sym] = entry[3] if len(entry) > 3 else None
+            profile = FirmProfile.from_legacy(entry)
+            sym = profile.symbol
+            self._firm_profiles[sym] = profile
+            self._green_profiles[sym] = profile.green_score
+            self._strategy_profiles[sym] = profile.strategy
+            self._size_profiles[sym] = profile.legacy_firm_size
 
         self.venues = [MarketVenue(sym, self.initial_price)
                        for sym in self._green_profiles]
@@ -413,15 +617,38 @@ class Simulation:
         # (re-pointed to the TRUE score, WP1.2) and derives the firm-size
         # proxy (WP1.1) unless the profile pins one.
         for venue in self.venues:
+            profile = self._firm_profiles[venue.symbol]
             venue.asset = Asset(
                 venue.symbol, self.initial_price,
                 venue.shares_outstanding * self.initial_price,
                 green_score=self._green_profiles[venue.symbol],
-                firm_size=self._size_profiles[venue.symbol])
+                firm_size=self._size_profiles[venue.symbol],
+                annual_net_turnover=profile.annual_net_turnover,
+                average_employees=profile.average_employees,
+                sector=profile.sector,
+                fact_period_start=self.start_date,
+                fact_period_end=date(self.start_date.year, 12, 31))
+            venue.asset.firm_profile = profile
             venue.log_price.append(self.initial_price)
             venue.log_balance.append(venue.asset.balance)
             venue.log_green_score = [venue.asset.green_score]  # Disclosed
             venue.log_true_score = [venue.asset.true_green_score]
+            venue.log_supported_score = [
+                venue.asset.regulatory_eligibility_score]
+            venue.log_greenhushing_gap = [0.0]
+            venue.log_employee_trust = [venue.asset.workforce.trust]
+            venue.log_productivity = [
+                venue.asset.workforce.productivity_multiplier]
+            venue.log_turnover = [venue.asset.workforce.annual_turnover_rate]
+            venue.log_employees = [
+                venue.asset.workforce.average_employees_365d]
+            venue.log_consumer_revenue = [0.0]
+            venue.log_consumer_gap = [0.0]
+            venue.log_claims = [0]
+            venue.log_cases = [0]
+            venue.log_real_environmental_spend = [0.0]
+            venue.log_communication_spend = [0.0]
+            venue.log_evidence_spend = [0.0]
             # Part G, WP2/WP5: the corporate policy agent (owns disclosure
             # AND the NPV transition machinery; replaces the deleted
             # stepped heuristic).
@@ -431,6 +658,9 @@ class Simulation:
                     self._strategy_profiles[venue.symbol],
                     corporate_shells[venue.symbol],
                     self.esg_regulation)
+            if self.enable_greenwashing_supervision:
+                venue.communications = CorporateCommunicationsPolicy(
+                    venue.asset, self._strategy_profiles[venue.symbol])
 
         # Legacy aliases: the primary listing backs every single-asset
         # accessor (asset, order_book, EMAs, volatility window), so
@@ -458,6 +688,8 @@ class Simulation:
             if self.esg_regulation is not None:
                 self.credit_market.esg_regulation = self.esg_regulation
                 self.credit_market.collateral_asset = primary.asset
+                self.credit_market.use_supported_environmental_information = \
+                    self.enable_greenwashing_supervision
 
         # Part F monetary policy: Taylor rule with Gaussian surprise,
         # anchored on economy-wide price growth and volume output gaps.
@@ -494,6 +726,42 @@ class Simulation:
         self.log_bond_coupons: list[float] = []    # WP6 cumulative coupons
         self.log_bank_rr: list[float] = []         # WP7 required reserves
         self.log_reserve_shortfalls: list[int] = []  # WP7 cumulative events
+        # Opt-in real-economy and workforce series.
+        self.log_consumer_gross_revenue: list[float] = []
+        self.log_consumer_external_cost: list[float] = []
+        self.log_consumer_corporate_margin: list[float] = []
+        self.log_consumer_perceived_discrepancy: list[float] = []
+        self.log_workforce_trust: list[float] = []
+        self.log_workforce_productivity: list[float] = []
+        self.log_workforce_turnover: list[float] = []
+        self.log_workforce_departures: list[float] = []
+        self.log_mean_claim_divergence: list[float] = []
+        self.log_greenhushing_gap: list[float] = []
+        self.log_regulatory_cases: list[int] = []
+        self.log_regulatory_queue: list[int] = []
+        self.log_supervision_precision: list[float] = []
+        self.log_supervision_recall: list[float] = []
+        self.log_supervision_false_positive_rate: list[float] = []
+        self.log_supervision_false_negative_rate: list[float] = []
+        # Part H: policy-regime daily series (zeros under the baseline).
+        self.log_policy_state_cost: list[float] = []
+        self.log_policy_firm_cost: list[float] = []
+        self.log_prescreen_submissions: list[int] = []
+        self.log_prescreen_revisions: list[int] = []
+        self.log_prescreen_withdrawals: list[int] = []
+        self.log_prescreen_published_against_advice: list[int] = []
+        self.log_connector_transfers: list[int] = []
+        self.log_connector_flags: list[int] = []
+        self.log_connector_incidents: list[int] = []
+        # Research-only: drafts withheld after hub feedback (evaluation of
+        # greenhushing and truthful-claim suppression; never re-published).
+        self._withheld_draft_claims: list = []
+        # Part I.5 -- OPERATIONAL hub processing delay: drafts under
+        # review are withheld from every public surface (claim history,
+        # claim log, supervisor, consumers, investors) until their
+        # review_day; releases feed the next supervisory period.
+        self._hub_pending_claims: list = []      # (review_day, sym, claim, ev)
+        self._released_claims_buffer: list = []  # (claim, evidence_records)
 
     def _add_position(self, venue: MarketVenue, owner: Trader,
                       shares: int, current_day: int = 0) -> AssetPosition:
@@ -560,7 +828,7 @@ class Simulation:
             # so ESG-without-regulation keeps Part F greenium pricing.
             if self.esg_regulation is not None:
                 trader.sophisticated = \
-                    random.random() < SOPHISTICATED_FRACTION
+                    random.random() < self._sophisticated_fraction
                 trader.credibility = {venue.symbol: CREDIBILITY_PRIOR
                                       for venue in self.venues}
         else:
@@ -1030,9 +1298,110 @@ class Simulation:
         eligible = sum(1 for v in venues
                        if v.asset.disclosed_green_score
                        >= STATE_GREEN_THRESHOLD)
+        period_claims = []
+        period_evidence = []
+        period_connector_records = []
+        mandatory_firms: set[str] = set()
+        # Part I.5: hub-released claims from earlier days enter THIS
+        # period's supervisory batch together with their evidence.
+        if self._released_claims_buffer:
+            for released_claim, released_evidence in \
+                    self._released_claims_buffer:
+                period_claims.append(released_claim)
+                period_evidence.extend(released_evidence)
+            self._released_claims_buffer.clear()
         for venue in venues:
             policy = venue.policy
             if policy is None:
+                continue
+            if self.enable_greenwashing_supervision:
+                communication_date = self.date_for_day(day)
+                asset = venue.asset
+                mandatory = self.legal_regime.csrd_in_scope(
+                    asset.firm_profile, communication_date,
+                    asset.workforce.average_employees_365d)
+                if mandatory:
+                    mandatory_firms.add(venue.symbol)
+                decision, claims, evidence = \
+                    venue.communications.communicate(
+                        day, communication_date,
+                        self.regulatory_strictness,
+                        mandatory, self._communications_rng,
+                        guidance_support=self.greenwashing_supervisor
+                        .parameters.guidance_support_intensity,
+                        evidence_support=self.greenwashing_supervisor
+                        .parameters.small_firm_evidence_support
+                        if not mandatory else 0.0,
+                        compliance_burden_scale=self
+                        .compliance_burden_scale)
+                # Research-only truth snapshot for EVERY draft, including
+                # those the hub later withholds -- greenhushing evaluation
+                # needs to know whether a withheld claim was truthful.
+                # The intent snapshot (the decision's deliberate
+                # overstatement component) lives under the same
+                # quarantine: read exclusively by the ex-post evaluator,
+                # never by any agent, policy system or supervisor.
+                for claim in claims:
+                    self._evaluation_truth_by_claim[claim.claim_id] = \
+                        asset.environmental_facts.value_for(claim.subject)
+                    self._evaluation_intent_by_claim[claim.claim_id] = \
+                        decision.overstatement
+                strategy = venue.communications.strategy
+                # Part H, Regime B: voluntary pre-publication screening.
+                # Withheld drafts never reach the public claim log, the
+                # supervisor, consumers or investors. Part I.5: drafts
+                # under review are additionally withheld until their
+                # operational review_day.
+                if self.prescreening_hub is not None:
+                    drafts = list(claims)
+                    claims, evidence = \
+                        self.prescreening_hub.process_firm_claims(
+                            day, asset, strategy, claims, evidence,
+                            mandatory, self._prescreening_rng,
+                            state=self.state)
+                    self._withheld_draft_claims.extend(
+                        draft for draft in drafts if draft.withdrawn)
+                    pending = [c for c in claims
+                               if c.review_day is not None
+                               and c.review_day > day]
+                    if pending:
+                        claims = [c for c in claims if c not in pending]
+                        evidence_by_id_local = {
+                            record.evidence_id: record
+                            for record in evidence}
+                        for pending_claim in pending:
+                            # Not public until release: remove from the
+                            # firm's public history (communicate() had
+                            # appended it optimistically).
+                            if pending_claim in asset.claim_history:
+                                asset.claim_history.remove(pending_claim)
+                            linked = [evidence_by_id_local[eid]
+                                      for eid in pending_claim.evidence_ids
+                                      if eid in evidence_by_id_local]
+                            self._hub_pending_claims.append(
+                                (pending_claim.review_day, venue.symbol,
+                                 pending_claim, linked))
+                # Part H, Regime C: authorized certified transfers and
+                # automatic population of covered report metrics.
+                if self.green_data_connector is not None:
+                    connector = self.green_data_connector
+                    connector.onboard_firm(asset, strategy,
+                                           self._connector_rng,
+                                           state=self.state)
+                    conn_records = connector.transfer_period(
+                        day, communication_date, asset,
+                        self._connector_rng, state=self.state)
+                    if conn_records:
+                        connector.auto_populate(claims, conn_records,
+                                                strategy,
+                                                self._connector_rng)
+                        evidence = list(evidence) + conn_records
+                        asset.evidence_history.extend(conn_records)
+                        period_connector_records.extend(conn_records)
+                self.claim_log.extend(claims)
+                self.evidence_log.extend(evidence)
+                period_claims.extend(claims)
+                period_evidence.extend(evidence)
                 continue
             float_value = venue.shares_outstanding \
                 * venue.asset.get_last_price()
@@ -1043,10 +1412,57 @@ class Simulation:
                 STATE_DAILY_INVESTMENT, eligible, float_value,
                 REG_REPORTING_PERIOD_DAYS)
 
+        if self.enable_greenwashing_supervision and period_claims:
+            # Part H, Regime C: reconciliation runs BEFORE screening so a
+            # material mismatch can prioritise the claim. It never
+            # sanctions by itself -- the flagged claim enters the ordinary
+            # procedural path of the existing supervisor.
+            connector_flags: set[str] = set()
+            if self.green_data_connector is not None:
+                self.green_data_connector.book_period_operating(
+                    REG_REPORTING_PERIOD_DAYS, state=self.state)
+                # Part I.6 -- register-error correction lifecycle: due
+                # corrections issue superseding records that enter THIS
+                # period's evidence prospectively (historical decisions
+                # are never rewritten).
+                assets_by_symbol = {v.symbol: v.asset for v in venues}
+                corrected_records = \
+                    self.green_data_connector.process_corrections(
+                        day, assets_by_symbol, self._connector_rng)
+                for corrected in corrected_records:
+                    period_evidence.append(corrected)
+                    period_connector_records.append(corrected)
+                    self.evidence_log.append(corrected)
+                    assets_by_symbol[
+                        corrected.firm_symbol].evidence_history.append(
+                        corrected)
+                _, connector_flags = self.green_data_connector.reconcile(
+                    day, period_claims, period_connector_records,
+                    [record for record in period_evidence
+                     if record.source
+                     != EvidenceSource.CERTIFIED_PUBLIC_CONNECTOR])
+            asset_map = {venue.symbol: venue.asset for venue in venues}
+            period_assessments, opened_cases = \
+                self.greenwashing_supervisor.process_period(
+                    day, self.date_for_day(day), asset_map,
+                    period_claims, period_evidence, mandatory_firms,
+                    self._assurance_rng, state=self.state,
+                    connector_flags=connector_flags)
+            # Part H, Regime B safe-harbour-LIKE experiment (default OFF).
+            if (self.prescreening_hub is not None
+                    and self.prescreening_hub.parameters
+                    .safe_harbor_enabled):
+                self._apply_prescreening_safe_harbor(period_assessments)
+            self.evidence_log = list(
+                self.greenwashing_supervisor.evidence.values())
+            self.regulatory_case_log.extend(opened_cases)
+
         # (3) WP1.3 limited-assurance audits -> WP1.5 scandals. Only
         # mandatory disclosers are ever audited; the pre-enforcement
         # regime (WP1.7) consumes zero RNG draws inside run_audit.
-        if regulation is not None and regulation.enforcement_active(day):
+        if (not self.enable_greenwashing_supervision
+                and regulation is not None
+                and regulation.enforcement_active(day)):
             for venue in venues:
                 asset = venue.asset
                 if not regulation.is_mandatory_discloser(
@@ -1065,6 +1481,299 @@ class Simulation:
                                  self._venue_fundamental(venue))
             self.total_treasury_sweeps += (policy.total_treasury_swept
                                            - swept_before)
+
+    def date_for_day(self, day: int) -> date:
+        """Public day/date mapping used by every legal decision."""
+        from datetime import timedelta
+        return self.start_date + timedelta(days=max(0, int(day) - 1))
+
+    def _update_workforces(self, day: int) -> None:
+        """Employees react only to internal evidence and public decisions."""
+        for venue in self.venues:
+            asset = venue.asset
+            workforce = asset.workforce
+            claim = next((item for item in reversed(asset.claim_history)
+                          if item.subject.value == "green_score"
+                          and not item.withdrawn), None)
+            public = asset.public_environmental_signals[-1] \
+                if asset.public_environmental_signals else None
+            new_claim = claim is not None \
+                and claim.claim_id != asset.last_workforce_claim_id
+            new_public = public is not None \
+                and public.day > asset.last_workforce_public_signal_day
+            if new_claim:
+                record_map = {record.evidence_id: record
+                              for record in asset.evidence_history}
+                linked = next((record_map[eid]
+                               for eid in claim.evidence_ids
+                               if eid in record_map
+                               and record_map[eid].accessible_to_employees),
+                              None)
+                estimate = linked.estimate if linked is not None \
+                    else asset.supported_green_score
+                uncertainty = linked.standard_error if linked is not None \
+                    else 0.10
+                workforce.observe_internal_signal(
+                    claim.asserted_value, estimate, uncertainty,
+                    confirmed_abuse=bool(new_public
+                                         and public.confirmed_abuse),
+                    current_day=day)
+                asset.last_workforce_claim_id = claim.claim_id
+            elif new_public:
+                workforce.observe_internal_signal(
+                    asset.disclosed_green_score, public.supported_score,
+                    0.02, confirmed_abuse=public.confirmed_abuse,
+                    current_day=day)
+            else:
+                # Quiet days permit slow trust recovery.
+                workforce.observe_internal_signal(
+                    asset.supported_green_score, asset.supported_green_score,
+                    0.10, current_day=day)
+            if new_public:
+                asset.last_workforce_public_signal_day = public.day
+            movement = workforce.daily_step(self._workforce_rng, day)
+            replacement_cost = movement["replacement_cost"]
+            headroom = max(0.0, asset.balance - CORPORATE_BALANCE_FLOOR)
+            asset.balance -= min(replacement_cost, headroom)
+            asset.average_employees = workforce.average_employees_365d
+
+    def _release_hub_claims(self, day: int) -> None:
+        """Part I.5 -- publish hub-reviewed drafts whose operational
+        review delay has elapsed: they enter the public claim history
+        (visible to consumers/investors from today) and the next
+        supervisory period's screening batch."""
+        if not self._hub_pending_claims:
+            return
+        due = [entry for entry in self._hub_pending_claims
+               if entry[0] <= day]
+        if not due:
+            return
+        self._hub_pending_claims = [
+            entry for entry in self._hub_pending_claims if entry[0] > day]
+        assets = {venue.symbol: venue.asset for venue in self.venues}
+        for _, symbol, claim, linked_evidence in due:
+            assets[symbol].claim_history.append(claim)
+            self.claim_log.append(claim)
+            self._released_claims_buffer.append((claim, linked_evidence))
+
+    def _run_real_economy_day(self, day: int) -> None:
+        if not self.enable_greenwashing_supervision:
+            return
+        self._release_hub_claims(day)
+        self._update_workforces(day)
+        self.consumer_market.step(day, self.venues, self._consumer_rng)
+
+    def _investor_environmental_context(
+            self, trader: Trader, asset: Asset, day: int) \
+            -> Optional[InvestorEnvironmentalContext]:
+        """Build a posterior from claims, evidence and public decisions."""
+        if not self.enable_greenwashing_supervision:
+            return None
+        credibility = trader.credibility.get(asset.symbol, 1.0) \
+            if trader.credibility is not None else 1.0
+        posterior = asset.disclosed_green_score
+        controversy = 0.0
+        confirmed = False
+        public = asset.public_environmental_signals[-1] \
+            if asset.public_environmental_signals else None
+        if trader.sophisticated:
+            claim = next((item for item in reversed(asset.claim_history)
+                          if item.subject == ClaimSubject.GREEN_SCORE
+                          and not item.withdrawn), None)
+            if claim is not None:
+                evidence_by_id = {record.evidence_id: record
+                                  for record in asset.evidence_history}
+                linked = next((evidence_by_id[eid]
+                               for eid in claim.evidence_ids
+                               if eid in evidence_by_id
+                               and evidence_by_id[eid]
+                               .accessible_to_investors), None)
+                if linked is not None:
+                    posterior = min(posterior, max(0.0, linked.estimate))
+            if asset.last_upgrade_day > asset.last_transition_day:
+                controversy = 0.06
+        if public is not None:
+            if trader.sophisticated:
+                posterior = public.supported_score
+                controversy = max(controversy, public.controversy_discount)
+            else:
+                posterior = (0.70 * posterior
+                             + 0.30 * public.supported_score)
+                controversy = max(controversy,
+                                  0.40 * public.controversy_discount)
+            credibility = min(credibility, public.credibility) \
+                if public.confirmed_abuse else max(
+                    credibility, 0.5 * public.credibility)
+            confirmed = public.confirmed_abuse
+            age = max(0, day - public.day)
+        else:
+            age = max(0, day - asset.last_disclosure_day) \
+                if asset.last_disclosure_day > -10**8 else day
+        return InvestorEnvironmentalContext(
+            posterior_score=posterior,
+            credibility=credibility,
+            controversy_discount=controversy
+            * self.investor_controversy_scale,
+            disclosure_age_days=age,
+            confirmed_abuse=confirmed)
+
+    # ------------------------------------------------------------------ #
+    # Part J (Workstream C): source re-verification service
+    # ------------------------------------------------------------------ #
+    def _request_reverification(self, firm_symbol: str,
+                                subject: ClaimSubject, day: int) -> None:
+        """Route a supervisory re-measurement request to the evidence
+        source. Regime C: the connector's register-correction lifecycle
+        answers it (superseding record after the correction delay).
+        Otherwise a stylized third-party re-measurement is scheduled."""
+        if self.green_data_connector is not None \
+                and self.green_data_connector.request_verification(
+                    firm_symbol, subject, day):
+            return
+        self._pending_reverifications.append(
+            (day + SOURCE_REVERIFICATION_DELAY_DAYS, firm_symbol, subject))
+
+    def _process_due_reverifications(self, day: int) -> None:
+        """Deliver commissioned third-party re-measurements that are due.
+
+        The re-verifier is a measurement apparatus over the physical
+        ledger -- exactly like the firm's own meters and the connector
+        transfer function. Only its uncertain EvidenceRecord output ever
+        reaches the supervisor; no decision logic reads latent facts.
+        """
+        if not self._pending_reverifications \
+                or self.greenwashing_supervisor is None \
+                or self.venues is None:
+            return
+        due = [item for item in self._pending_reverifications
+               if item[0] <= day]
+        if not due:
+            return
+        self._pending_reverifications = [
+            item for item in self._pending_reverifications
+            if item[0] > day]
+        assets = {venue.symbol: venue.asset for venue in self.venues}
+        bounded_subjects = {
+            ClaimSubject.GREEN_SCORE, ClaimSubject.RENEWABLE_ENERGY_SHARE,
+            ClaimSubject.RECYCLING_RATE, ClaimSubject.TAXONOMY_ELIGIBILITY,
+            ClaimSubject.TAXONOMY_ALIGNMENT, ClaimSubject.WATER_INTENSITY,
+            ClaimSubject.POLLUTION_INTENSITY,
+        }
+        for _, firm_symbol, subject in due:
+            asset = assets.get(firm_symbol)
+            if asset is None:
+                continue
+            facts = asset.environmental_facts
+            truth = facts.value_for(subject)
+            scale = max(abs(truth), 1e-6)
+            standard_error = max(
+                scale * REVERIFICATION_RELATIVE_ERROR, 1e-9)
+            estimate = truth + self._reverification_rng.gauss(
+                0.0, standard_error)
+            if subject in bounded_subjects:
+                estimate = min(1.0, max(0.0, estimate))
+            else:
+                estimate = max(0.0, estimate)
+            self._reverification_sequence += 1
+            record = EvidenceRecord(
+                evidence_id=(f"RV-{firm_symbol}-{day}"
+                             f"-{self._reverification_sequence}"),
+                firm_symbol=firm_symbol,
+                subject=subject,
+                period_start=facts.period_start,
+                period_end=facts.period_end,
+                estimate=estimate,
+                standard_error=standard_error,
+                source=EvidenceSource.THIRD_PARTY,
+                coverage=0.85,
+                independence=0.90,
+                verified=True,
+                notes=("Commissioned third-party re-measurement answering "
+                       "a supervisory conflict investigation; uncertainty "
+                       "and coverage limits apply."),
+                reliability_prior=0.90,
+                observation_method="commissioned_remeasurement",
+                accessible_to_regulator=True,
+                accessible_to_investors=True,
+            )
+            self.greenwashing_supervisor.register_external_evidence(
+                record, day)
+            self.evidence_log.append(record)
+            asset.evidence_history.append(record)
+
+    def _apply_prescreening_safe_harbor(self, assessments: list) -> None:
+        """
+        Part H, Regime B, EXPERIMENT (default OFF): a claim that went
+        through pre-screening with no legally material issue receives
+        correction treatment instead of a NEGLIGENCE label. The downgrade
+        NEVER applies to prohibited practices, systemic abuse or
+        overstatement, and never when the published value contradicts the
+        firm's own linked evidence (evidence known to the firm) -- the
+        hub cannot shield deliberate concealment.
+        """
+        hub = self.prescreening_hub
+        supervisor = self.greenwashing_supervisor
+        for assessment in assessments:
+            if assessment.outcome != AssessmentOutcome.NEGLIGENCE:
+                continue
+            if assessment.claim_id not in hub.cleanly_prescreened:
+                continue
+            claim = supervisor.claims[assessment.claim_id]
+            record = next((supervisor.evidence[eid]
+                           for eid in claim.evidence_ids
+                           if eid in supervisor.evidence), None)
+            if record is not None and abs(
+                    claim.asserted_value - record.estimate) \
+                    > 2.0 * max(record.standard_error, 1e-9):
+                continue   # Contradicted by evidence known to the firm.
+            assessment.outcome = AssessmentOutcome.CORRECTABLE_ERROR
+            assessment.corrective_action = "correct"
+            assessment.reasons += (
+                "EXPERIMENT: clean non-binding pre-screening converts a "
+                "negligence label into correction treatment; no shield "
+                "for concealment, prohibited practices or abuse.",)
+
+    def _supervision_accuracy(self) -> tuple[float, float, float, float]:
+        """Research-only precision/recall against the latent claim snapshot."""
+        supervisor = self.greenwashing_supervisor
+        if supervisor is None or not supervisor.assessments:
+            return 1.0, 1.0, 0.0, 0.0
+        tp = fp = tn = fn = 0
+        for assessment in supervisor.assessments.values():
+            claim = supervisor.claims[assessment.claim_id]
+            truth = self._evaluation_truth_by_claim.get(claim.claim_id)
+            if truth is None:
+                continue
+            raw = claim.asserted_value - truth
+            if claim.subject in {
+                    ClaimSubject.SCOPE_1_EMISSIONS,
+                    ClaimSubject.SCOPE_2_EMISSIONS,
+                    ClaimSubject.SCOPE_3_EMISSIONS,
+                    ClaimSubject.WATER_INTENSITY,
+                    ClaimSubject.POLLUTION_INTENSITY,
+                    ClaimSubject.BIODIVERSITY_PRESSURE,
+                    ClaimSubject.NET_ZERO}:
+                raw = -raw
+            scale = 1.0 if claim.unit in {
+                "share_0_1", "score_0_1", "net_emissions_ratio"} \
+                else max(abs(truth), 1.0)
+            actual = max(0.0, raw) / scale >= 0.02
+            if assessment.outcome.value == "prohibited_practice":
+                actual = True
+            predicted = assessment.confirmed_abuse
+            if predicted and actual:
+                tp += 1
+            elif predicted:
+                fp += 1
+            elif actual:
+                fn += 1
+            else:
+                tn += 1
+        precision = tp / (tp + fp) if tp + fp else 1.0
+        recall = tp / (tp + fn) if tp + fn else 1.0
+        false_positive = fp / (fp + tn) if fp + tn else 0.0
+        false_negative = fn / (fn + tp) if fn + tp else 0.0
+        return precision, recall, false_positive, false_negative
 
     def _trigger_scandal(self, venue: MarketVenue, day: int) -> None:
         """
@@ -1132,8 +1841,14 @@ class Simulation:
         else:
             self.log_credibility.append(1.0)
         regulation = self.esg_regulation
-        self.log_scandals.append(
-            regulation.scandals_detected if regulation is not None else 0)
+        if self.greenwashing_supervisor is not None:
+            self.log_scandals.append(sum(
+                assessment.confirmed_abuse and assessment.published
+                for assessment in
+                self.greenwashing_supervisor.assessments.values()))
+        else:
+            self.log_scandals.append(
+                regulation.scandals_detected if regulation is not None else 0)
         extracted = 0.0
         for venue in self.venues:
             if venue.policy is not None:
@@ -1147,6 +1862,129 @@ class Simulation:
                                 if bank is not None else 0.0)
         self.log_reserve_shortfalls.append(
             bank.reserve_shortfall_events if bank is not None else 0)
+        if self.consumer_market is not None:
+            flows = self.consumer_market.last_flows
+            flows_by_symbol = {flow.firm_symbol: flow for flow in flows}
+            self.log_consumer_gross_revenue.append(
+                sum(flow.gross_revenue for flow in flows))
+            self.log_consumer_external_cost.append(
+                sum(flow.external_production_cost for flow in flows))
+            self.log_consumer_corporate_margin.append(
+                sum(flow.corporate_margin for flow in flows))
+            self.log_consumer_perceived_discrepancy.append(
+                sum(flow.perceived_discrepancy for flow in flows)
+                / len(flows) if flows else 0.0)
+            workforces = [venue.asset.workforce for venue in self.venues]
+            self.log_workforce_trust.append(
+                sum(item.trust for item in workforces) / len(workforces))
+            self.log_workforce_productivity.append(
+                sum(item.productivity_multiplier for item in workforces)
+                / len(workforces))
+            self.log_workforce_turnover.append(
+                sum(item.annual_turnover_rate for item in workforces)
+                / len(workforces))
+            self.log_workforce_departures.append(
+                sum(item.cumulative_departures for item in workforces))
+            assessments = list(
+                self.greenwashing_supervisor.assessments.values())
+            z_values = [item.standardized_divergence for item in assessments
+                        if item.standardized_divergence is not None]
+            self.log_mean_claim_divergence.append(
+                sum(z_values) / len(z_values) if z_values else 0.0)
+            self.log_greenhushing_gap.append(sum(
+                venue.asset.greenhushing_gap for venue in self.venues)
+                / len(self.venues))
+            self.log_regulatory_cases.append(
+                len(self.greenwashing_supervisor.cases))
+            self.log_regulatory_queue.append(
+                self.greenwashing_supervisor.pending_queue_length)
+            precision, recall, fpr, fnr = self._supervision_accuracy()
+            self.log_supervision_precision.append(precision)
+            self.log_supervision_recall.append(recall)
+            self.log_supervision_false_positive_rate.append(fpr)
+            self.log_supervision_false_negative_rate.append(fnr)
+            for venue in self.venues:
+                asset = venue.asset
+                flow = flows_by_symbol.get(venue.symbol)
+                venue.log_supported_score.append(
+                    asset.regulatory_eligibility_score)
+                venue.log_greenhushing_gap.append(asset.greenhushing_gap)
+                venue.log_employee_trust.append(asset.workforce.trust)
+                venue.log_productivity.append(
+                    asset.workforce.productivity_multiplier)
+                venue.log_turnover.append(
+                    asset.workforce.annual_turnover_rate)
+                venue.log_employees.append(
+                    asset.workforce.average_employees_365d)
+                venue.log_consumer_revenue.append(
+                    flow.gross_revenue if flow is not None else 0.0)
+                venue.log_consumer_gap.append(
+                    flow.perceived_discrepancy if flow is not None else 0.0)
+                venue.log_claims.append(len(asset.claim_history))
+                venue.log_cases.append(sum(
+                    case.firm_symbol == venue.symbol
+                    for case in self.greenwashing_supervisor.cases))
+                venue.log_real_environmental_spend.append(
+                    asset.real_environmental_investment_spend
+                    + (float(venue.policy.total_transition_spend_dec)
+                       if venue.policy is not None else 0.0))
+                venue.log_communication_spend.append(
+                    asset.communication_preparation_spend)
+                venue.log_evidence_spend.append(
+                    asset.environmental_evidence_spend)
+        else:
+            self.log_consumer_gross_revenue.append(0.0)
+            self.log_consumer_external_cost.append(0.0)
+            self.log_consumer_corporate_margin.append(0.0)
+            self.log_consumer_perceived_discrepancy.append(0.0)
+            self.log_workforce_trust.append(1.0)
+            self.log_workforce_productivity.append(1.0)
+            self.log_workforce_turnover.append(0.0)
+            self.log_workforce_departures.append(0.0)
+            self.log_mean_claim_divergence.append(0.0)
+            self.log_greenhushing_gap.append(0.0)
+            self.log_regulatory_cases.append(0)
+            self.log_regulatory_queue.append(0)
+            self.log_supervision_precision.append(1.0)
+            self.log_supervision_recall.append(1.0)
+            self.log_supervision_false_positive_rate.append(0.0)
+            self.log_supervision_false_negative_rate.append(0.0)
+
+        # Part H: policy-regime series (all zero under the baseline arm).
+        hub = self.prescreening_hub
+        connector = self.green_data_connector
+        state_cost = 0.0
+        firm_cost = 0.0
+        if hub is not None:
+            state_cost += float(hub.state_cost_dec)
+            firm_cost += float(sum(hub.firm_cost_dec.values(),
+                                   Decimal("0")))
+        if connector is not None:
+            state_cost += float(connector.state_cost_dec)
+            firm_cost += float(sum(connector.firm_cost_dec.values(),
+                                   Decimal("0")))
+        self.log_policy_state_cost.append(state_cost)
+        self.log_policy_firm_cost.append(firm_cost)
+        self.log_prescreen_submissions.append(
+            hub.submissions if hub is not None else 0)
+        self.log_prescreen_revisions.append(
+            hub.revisions if hub is not None else 0)
+        self.log_prescreen_withdrawals.append(
+            hub.withdrawals if hub is not None else 0)
+        self.log_prescreen_published_against_advice.append(
+            hub.published_against_advice if hub is not None else 0)
+        self.log_connector_transfers.append(
+            connector.transfers if connector is not None else 0)
+        self.log_connector_flags.append(
+            len([f for f in connector.findings
+                 if f.classification in {
+                     "correction_required", "suspicious_manual_override",
+                     "material_calculation_overstatement",
+                     "repeated_data_manipulation"}])
+            if connector is not None else 0)
+        self.log_connector_incidents.append(
+            (connector.cyber_incidents + connector.downtime_events)
+            if connector is not None else 0)
 
     def _debug_validate_conservation(self) -> None:
         """
@@ -1157,7 +1995,10 @@ class Simulation:
         state, regulation = self.state, self.esg_regulation
         if regulation is not None:
             # WP1.5: penalties are transfers, never sinks.
-            assert regulation.total_penalties_dec \
+            supervised_penalties = self.greenwashing_supervisor \
+                .total_penalties_dec \
+                if self.greenwashing_supervisor is not None else Decimal("0")
+            assert regulation.total_penalties_dec + supervised_penalties \
                 == state.penalty_inflow_dec, "penalty ledger asymmetry"
         # WP6: every earmarked euro is in the sub-ledger or was spent green.
         assert state.bonds_issued_dec \
@@ -1167,6 +2008,8 @@ class Simulation:
         bank = self.commercial_bank
         if bank is not None:
             assert bank.required_reserves_dec >= 0, "negative reserves"
+        if self.consumer_market is not None:
+            self.consumer_market.ledger.validate(tolerance=1e-6)
 
     def _update_policy_rate(self, total_volume: float) -> None:
         """
@@ -1425,11 +2268,20 @@ class Simulation:
 
         for day in range(1, self.days + 1):
             last_price = {v.symbol: v.asset.get_last_price() for v in venues}
+            if self.greenwashing_supervisor is not None:
+                # Part J: commissioned re-measurements arrive before the
+                # supervisor's daily step so due conflict resolutions can
+                # already see them.
+                self._process_due_reverifications(day)
+                self.greenwashing_supervisor.advance_day(
+                    day, {v.symbol: v.asset for v in venues}, self.state,
+                    on_date=self.date_for_day(day))
 
             # Weekends: interest accrues (and bond coupons falling on a
             # weekend still pay -- servicing sits next to accrue_interest
             # per WP6), no trading.
             if self.is_weekend(day):
+                self._run_real_economy_day(day)
                 self.accrue_interest()
                 if regulation is not None:
                     self.state.service_bonds(day, self.commercial_bank,
@@ -1462,12 +2314,15 @@ class Simulation:
             if self.green_capital is not None:
                 p_green = self.green_capital.update_daily()
                 dg_total = self._corporate_daily(day, p_green)
+            self._run_real_economy_day(day)
             if day % EVOLUTION_EPOCH_DAYS == 0:
                 if self.green_capital is not None:
                     self._reporting_period(day)
                 self._pay_dividends_multi()
                 self.total_subsidies_paid += self.state.pay_subsidies(
-                    venues, day, regulation)
+                    venues, day, regulation,
+                    use_supported_information=
+                        self.enable_greenwashing_supervision)
 
             # 2. Fluid friction and probabilistic order decay, per venue.
             rel_vol = {}
@@ -1493,7 +2348,9 @@ class Simulation:
             credibility_index = self._credibility_index() \
                 if regulation is not None else None
             self.state.invest_green(venues, day, regulation,
-                                    credibility_index)
+                                    credibility_index,
+                                    use_supported_information=
+                                        self.enable_greenwashing_supervision)
             for manip in self.manipulators:
                 manip.act_green(venues, day)
             if credit is not None:
@@ -1534,7 +2391,9 @@ class Simulation:
                         vol, green,
                         trader_cred[venue.symbol]
                         if trader_cred is not None else 1.0,
-                        suspicious)
+                        suspicious,
+                        self._investor_environmental_context(
+                            trader, venue.asset, day))
                     if decision is None:
                         continue
 
@@ -1671,7 +2530,8 @@ class Simulation:
 
         plt.style.use('default')
         esg_active = self.venues is not None and len(self.log_pgreen) > 0
-        rows = 8 if esg_active else 5
+        supervision_active = bool(self.enable_greenwashing_supervision)
+        rows = 12 if supervision_active else (8 if esg_active else 5)
         fig, axes = plt.subplots(rows, 1, figsize=(12, 5.2 * rows))
         ax1, ax2, ax3, ax4, ax5 = axes[:5]
         days_range = list(range(self.days + 1))
@@ -1707,6 +2567,11 @@ class Simulation:
                 for (s_day, s_sym, _w, _p) in self.esg_regulation.scandal_log:
                     ax2.axvline(s_day, color='red', alpha=0.35,
                                 linewidth=0.9)
+            if self.greenwashing_supervisor is not None:
+                for case in self.greenwashing_supervisor.cases:
+                    if case.publication_day is not None:
+                        ax2.axvline(case.publication_day, color='red',
+                                    alpha=0.12, linewidth=0.6)
             ax2.set_title('Disclosed (solid) vs True (dashed) Green Scores -- scandals in red', fontsize=13, fontweight='bold', pad=15)
             ax2.set_ylabel('Green Score', fontsize=11, fontweight='bold')
             ax2.set_ylim(-0.05, 1.05)
@@ -1804,6 +2669,88 @@ class Simulation:
             ax8.legend(lines1 + lines2, labels1 + labels2,
                        loc='upper left', frameon=True)
 
+        if supervision_active:
+            ax9, ax10, ax11, ax12 = axes[8:12]
+            ax9.plot(active_days, self.log_consumer_gross_revenue,
+                     color='#1f77b4', label='External consumer budget')
+            ax9.plot(active_days, self.log_consumer_external_cost,
+                     color='#ff7f0e', label='External production cost')
+            ax9.plot(active_days, self.log_consumer_corporate_margin,
+                     color='#2ca02c', label='Corporate product margin')
+            ax9b = ax9.twinx()
+            ax9b.plot(active_days,
+                      self.log_consumer_perceived_discrepancy,
+                      color='#d62728', linestyle='--',
+                      label='Perceived discrepancy')
+            ax9.set_title('Consumer Demand and External Product-Market Ledger',
+                          fontsize=13, fontweight='bold', pad=15)
+            ax9.set_ylabel('Daily monetary flow')
+            ax9b.set_ylabel('Perceived discrepancy')
+            ax9.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax9.get_legend_handles_labels()
+            lines2, labels2 = ax9b.get_legend_handles_labels()
+            ax9.legend(lines1 + lines2, labels1 + labels2,
+                       loc='upper left', frameon=True)
+
+            ax10.plot(active_days, self.log_workforce_trust,
+                      color='#2ca02c', label='Employee trust')
+            ax10.plot(active_days, self.log_workforce_productivity,
+                      color='#17becf', label='Productivity multiplier')
+            ax10b = ax10.twinx()
+            ax10b.plot(active_days, self.log_workforce_turnover,
+                       color='#d62728', linestyle='--',
+                       label='Annual turnover rate')
+            ax10.set_ylim(0.0, 1.05)
+            ax10.set_title('Employee Trust, Slight Productivity Loss and Turnover',
+                           fontsize=13, fontweight='bold', pad=15)
+            ax10.set_ylabel('Trust / productivity')
+            ax10b.set_ylabel('Annual turnover rate')
+            ax10.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax10.get_legend_handles_labels()
+            lines2, labels2 = ax10b.get_legend_handles_labels()
+            ax10.legend(lines1 + lines2, labels1 + labels2,
+                        loc='lower left', frameon=True)
+
+            ax11.plot(active_days, self.log_mean_claim_divergence,
+                      color='#9467bd', label='Mean standardized divergence')
+            ax11.plot(active_days, self.log_greenhushing_gap,
+                      color='#bcbd22', label='Mean greenhushing gap')
+            ax11b = ax11.twinx()
+            ax11b.plot(active_days, self.log_regulatory_cases,
+                       color='#8c564b', label='Cases cumulative')
+            ax11b.plot(active_days, self.log_regulatory_queue,
+                       color='#7f7f7f', linestyle='--',
+                       label='Unresolved queue')
+            ax11.set_title('Claim Divergence, Greenhushing and Case Load',
+                           fontsize=13, fontweight='bold', pad=15)
+            ax11.set_ylabel('Divergence / greenhushing')
+            ax11b.set_ylabel('Cases')
+            ax11.grid(True, linestyle=':', alpha=0.6)
+            lines1, labels1 = ax11.get_legend_handles_labels()
+            lines2, labels2 = ax11b.get_legend_handles_labels()
+            ax11.legend(lines1 + lines2, labels1 + labels2,
+                        loc='upper left', frameon=True)
+
+            ax12.plot(active_days, self.log_supervision_precision,
+                      color='#1f77b4', label='Precision')
+            ax12.plot(active_days, self.log_supervision_recall,
+                      color='#2ca02c', label='Recall')
+            ax12.plot(active_days,
+                      self.log_supervision_false_positive_rate,
+                      color='#ff7f0e', linestyle='--',
+                      label='False-positive rate')
+            ax12.plot(active_days,
+                      self.log_supervision_false_negative_rate,
+                      color='#d62728', linestyle='--',
+                      label='False-negative rate')
+            ax12.set_ylim(-0.02, 1.02)
+            ax12.set_title('Research-Only Regulator Classification Metrics',
+                           fontsize=13, fontweight='bold', pad=15)
+            ax12.set_xlabel('Calendar Days')
+            ax12.set_ylabel('Rate')
+            ax12.grid(True, linestyle=':', alpha=0.6)
+            ax12.legend(loc='best', frameon=True)
+
         plt.tight_layout()
         plt.savefig(output_path, dpi=300)
         print(f"Comprehensive ESG Dashboard figure saved safely as '{output_path}'.")
@@ -1823,6 +2770,26 @@ def export_simulation_metrics(sim: Simulation,
     difference).
     """
     esg_active = sim.venues is not None and len(sim.log_pgreen) > 0
+    supervision_active = bool(sim.enable_greenwashing_supervision)
+    supervision_columns = [
+        'calendar_date', 'claims_cum', 'mean_standardized_divergence',
+        'mean_greenhushing_gap', 'regulatory_cases_cum',
+        'regulatory_queue', 'supervision_precision', 'supervision_recall',
+        'supervision_false_positive_rate',
+        'supervision_false_negative_rate', 'consumer_gross_revenue',
+        'consumer_external_production_cost', 'consumer_corporate_margin',
+        'consumer_perceived_discrepancy', 'employee_trust_mean',
+        'productivity_multiplier_mean', 'annual_turnover_rate_mean',
+        'employee_departures_cum',
+    ]
+    policy_columns = [
+        'policy_regime', 'policy_state_cost_cum', 'policy_firm_cost_cum',
+        'prescreen_submissions_cum', 'prescreen_revisions_cum',
+        'prescreen_withdrawals_cum',
+        'prescreen_published_against_advice_cum',
+        'connector_transfers_cum', 'connector_material_findings_cum',
+        'connector_incidents_cum',
+    ]
     with open(csv_path, mode='w', newline='') as f:
         writer = csv.writer(f)
         header = [
@@ -1839,6 +2806,29 @@ def export_simulation_metrics(sim: Simulation,
             for venue in sim.venues:
                 header += [f'{venue.symbol}_disclosed',
                            f'{venue.symbol}_true']
+        if supervision_active:
+            # Existing legacy and Part-G columns remain in their original
+            # order; every new field is appended after them.
+            header += supervision_columns
+            for venue in sim.venues:
+                header += [
+                    f'{venue.symbol}_supported',
+                    f'{venue.symbol}_greenhushing_gap',
+                    f'{venue.symbol}_employee_trust',
+                    f'{venue.symbol}_productivity',
+                    f'{venue.symbol}_annual_turnover_rate',
+                    f'{venue.symbol}_average_employees_365d',
+                    f'{venue.symbol}_consumer_revenue',
+                    f'{venue.symbol}_consumer_perceived_discrepancy',
+                    f'{venue.symbol}_claims_cum',
+                    f'{venue.symbol}_cases_cum',
+                    f'{venue.symbol}_real_environmental_spend_cum',
+                    f'{venue.symbol}_communication_spend_cum',
+                    f'{venue.symbol}_evidence_spend_cum',
+                ]
+            # Part H: regime identifier and policy-experiment series,
+            # appended strictly AFTER every pre-existing column.
+            header += policy_columns
         writer.writerow(header)
         for d in range(sim.days + 1):
             if d == 0:
@@ -1849,6 +2839,19 @@ def export_simulation_metrics(sim: Simulation,
                     for venue in sim.venues:
                         row += [venue.log_green_score[0],
                                 venue.log_true_score[0]]
+                if supervision_active:
+                    row += [sim.start_date.isoformat()] + [""] * (
+                        len(supervision_columns) - 1)
+                    for venue in sim.venues:
+                        row += [venue.log_supported_score[0],
+                                venue.log_greenhushing_gap[0],
+                                venue.log_employee_trust[0],
+                                venue.log_productivity[0],
+                                venue.log_turnover[0],
+                                venue.log_employees[0], 0.0, 0.0, 0, 0]
+                        row += [0.0, 0.0, 0.0]
+                    row += [sim.policy_regime.value,
+                            0.0, 0.0, 0, 0, 0, 0, 0, 0, 0]
                 writer.writerow(row)
             else:
                 i = d - 1
@@ -1873,5 +2876,237 @@ def export_simulation_metrics(sim: Simulation,
                     for venue in sim.venues:
                         row += [venue.log_green_score[d],
                                 venue.log_true_score[d]]
+                if supervision_active:
+                    row += [
+                        sim.date_for_day(d).isoformat(),
+                        len([claim for claim in sim.claim_log
+                             if claim.day <= d]),
+                        sim.log_mean_claim_divergence[i],
+                        sim.log_greenhushing_gap[i],
+                        sim.log_regulatory_cases[i],
+                        sim.log_regulatory_queue[i],
+                        sim.log_supervision_precision[i],
+                        sim.log_supervision_recall[i],
+                        sim.log_supervision_false_positive_rate[i],
+                        sim.log_supervision_false_negative_rate[i],
+                        sim.log_consumer_gross_revenue[i],
+                        sim.log_consumer_external_cost[i],
+                        sim.log_consumer_corporate_margin[i],
+                        sim.log_consumer_perceived_discrepancy[i],
+                        sim.log_workforce_trust[i],
+                        sim.log_workforce_productivity[i],
+                        sim.log_workforce_turnover[i],
+                        sim.log_workforce_departures[i],
+                    ]
+                    for venue in sim.venues:
+                        row += [
+                            venue.log_supported_score[d],
+                            venue.log_greenhushing_gap[d],
+                            venue.log_employee_trust[d],
+                            venue.log_productivity[d],
+                            venue.log_turnover[d],
+                            venue.log_employees[d],
+                            venue.log_consumer_revenue[d],
+                            venue.log_consumer_gap[d],
+                            venue.log_claims[d],
+                            venue.log_cases[d],
+                            venue.log_real_environmental_spend[d],
+                            venue.log_communication_spend[d],
+                            venue.log_evidence_spend[d],
+                        ]
+                    row += [
+                        sim.policy_regime.value,
+                        sim.log_policy_state_cost[i],
+                        sim.log_policy_firm_cost[i],
+                        sim.log_prescreen_submissions[i],
+                        sim.log_prescreen_revisions[i],
+                        sim.log_prescreen_withdrawals[i],
+                        sim.log_prescreen_published_against_advice[i],
+                        sim.log_connector_transfers[i],
+                        sim.log_connector_flags[i],
+                        sim.log_connector_incidents[i],
+                    ]
                 writer.writerow(row)
     print(f"Simulation metrics exported to '{csv_path}'.")
+
+
+def export_claim_audit_log(
+        sim: Simulation,
+        csv_path: str = "environmental_claim_audit_log.csv") -> None:
+    """Export one row per structured claim with evidence and assessment."""
+    fields = [
+        'claim_id', 'firm_symbol', 'day', 'communication_date', 'channel',
+        'audience', 'claim_type', 'subject', 'asserted_value', 'unit',
+        'period_start', 'period_end', 'organizational_boundary',
+        'operational_boundary', 'qualification', 'stated_uncertainty',
+        'evidence_ids', 'evidence_estimate', 'evidence_standard_error',
+        'evidence_source', 'evidence_confidence', 'withdrawn',
+        'evaluation_truth_research_only', 'assessment_outcome',
+        'legal_track', 'rule_authority', 'divergence',
+        'standardized_divergence', 'materiality', 'assessment_confidence',
+        'factual_severity', 'legal_relevance', 'audience_impact',
+        'conduct_severity', 'rule_ids', 'corrective_action', 'penalty',
+        'published', 'assessment_reasons', 'policy_regime',
+        # Part I.3 immutable-history columns (appended after every
+        # pre-existing column; legacy prefix unchanged).
+        'original_asserted_value', 'corrected_day', 'withdrawn_day',
+        'exposure_days', 'review_day',
+    ]
+    supervisor = sim.greenwashing_supervisor
+    assessments_by_claim = {}
+    if supervisor is not None:
+        for assessment in supervisor.assessments.values():
+            assessments_by_claim[assessment.claim_id] = assessment
+    evidence_by_id = {record.evidence_id: record
+                      for record in sim.evidence_log}
+    with open(csv_path, mode='w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for claim in sim.claim_log:
+            record = next((evidence_by_id[eid] for eid in claim.evidence_ids
+                           if eid in evidence_by_id), None)
+            assessment = assessments_by_claim.get(claim.claim_id)
+            writer.writerow({
+                'claim_id': claim.claim_id,
+                'firm_symbol': claim.firm_symbol,
+                'day': claim.day,
+                'communication_date': claim.communication_date.isoformat(),
+                'channel': claim.channel.value,
+                'audience': claim.audience.value,
+                'claim_type': claim.claim_type.value,
+                'subject': claim.subject.value,
+                'asserted_value': claim.asserted_value,
+                'unit': claim.unit,
+                'period_start': claim.period_start.isoformat(),
+                'period_end': claim.period_end.isoformat(),
+                'organizational_boundary': claim.organizational_boundary,
+                'operational_boundary': claim.operational_boundary,
+                'qualification': claim.qualification,
+                'stated_uncertainty': claim.stated_uncertainty,
+                'evidence_ids': '|'.join(claim.evidence_ids),
+                'evidence_estimate': record.estimate if record else '',
+                'evidence_standard_error':
+                    record.standard_error if record else '',
+                'evidence_source': record.source.value if record else '',
+                'evidence_confidence': record.confidence if record else '',
+                'withdrawn': claim.withdrawn,
+                'evaluation_truth_research_only':
+                    sim._evaluation_truth_by_claim.get(claim.claim_id, ''),
+                'assessment_outcome':
+                    assessment.outcome.value if assessment else '',
+                'legal_track':
+                    assessment.legal_track.value if assessment else '',
+                'rule_authority':
+                    assessment.authority.value if assessment else '',
+                'divergence': assessment.divergence if assessment else '',
+                'standardized_divergence':
+                    assessment.standardized_divergence if assessment else '',
+                'materiality': assessment.materiality if assessment else '',
+                'assessment_confidence':
+                    assessment.confidence if assessment else '',
+                'factual_severity':
+                    assessment.factual_severity if assessment else '',
+                'legal_relevance':
+                    assessment.legal_relevance if assessment else '',
+                'audience_impact':
+                    assessment.audience_impact if assessment else '',
+                'conduct_severity':
+                    assessment.conduct_severity if assessment else '',
+                'rule_ids': '|'.join(assessment.rule_ids)
+                    if assessment else '',
+                'corrective_action':
+                    assessment.corrective_action if assessment else '',
+                'penalty': assessment.penalty if assessment else '',
+                'published': assessment.published if assessment else '',
+                'assessment_reasons':
+                    '|'.join(assessment.reasons) if assessment else '',
+                'policy_regime': sim.policy_regime.value,
+                'original_asserted_value':
+                    claim.original_asserted_value
+                    if claim.original_asserted_value is not None else '',
+                'corrected_day': claim.corrected_day
+                    if claim.corrected_day is not None else '',
+                'withdrawn_day': claim.withdrawn_day
+                    if claim.withdrawn_day is not None else '',
+                'exposure_days': claim.exposure_days(sim.days),
+                'review_day': claim.review_day
+                    if claim.review_day is not None else '',
+            })
+    print(f"Environmental claim audit log exported to '{csv_path}'.")
+
+
+def export_correction_events(
+        sim: Simulation,
+        csv_path: str = "claim_correction_events.csv") -> None:
+    """Part I.3 -- export the immutable correction/withdrawal event
+    ledger (one row per event; original values preserved)."""
+    supervisor = sim.greenwashing_supervisor
+    events = supervisor.correction_events if supervisor is not None else []
+    fields = ['day', 'claim_id', 'firm_symbol', 'event', 'original_value',
+              'corrected_value', 'exposure_days', 'legal_track', 'case_id',
+              'basis', 'policy_regime']
+    with open(csv_path, mode='w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for event in events:
+            row = event.to_dict()
+            row['policy_regime'] = sim.policy_regime.value
+            writer.writerow(row)
+    print(f"Claim correction event ledger exported to '{csv_path}'.")
+
+
+def export_regulatory_cases(
+        sim: Simulation,
+        csv_path: str = "greenwashing_regulatory_cases.csv") -> None:
+    """Export the full procedural and monetary case ledger."""
+    fields = [
+        'case_id', 'firm_symbol', 'claim_id', 'opened_day', 'legal_track',
+        'authority', 'state', 'priority', 'trigger', 'assessment_id',
+        'correction_due_day', 'decision_day', 'publication_day',
+        'closed_day', 'remedy', 'calculated_penalty', 'applicable_cap',
+        'applied_penalty', 'redress', 'cross_border_consumer_case',
+        'duration_days', 'state_history', 'outcome', 'confidence',
+        'rule_ids', 'reasons', 'policy_regime',
+    ]
+    supervisor = sim.greenwashing_supervisor
+    cases = supervisor.cases if supervisor is not None else []
+    with open(csv_path, mode='w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for case in cases:
+            assessment = supervisor.assessments.get(case.assessment_id)
+            writer.writerow({
+                'case_id': case.case_id,
+                'firm_symbol': case.firm_symbol,
+                'claim_id': case.claim_id,
+                'opened_day': case.opened_day,
+                'legal_track': case.legal_track.value,
+                'authority': case.authority.value,
+                'state': case.state.value,
+                'priority': case.priority,
+                'trigger': case.trigger,
+                'assessment_id': case.assessment_id or '',
+                'correction_due_day': case.correction_due_day or '',
+                'decision_day': case.decision_day or '',
+                'publication_day': case.publication_day or '',
+                'closed_day': case.closed_day or '',
+                'remedy': case.remedy,
+                'calculated_penalty': case.calculated_penalty,
+                'applicable_cap': case.applicable_cap,
+                'applied_penalty': case.applied_penalty,
+                'redress': case.redress,
+                'cross_border_consumer_case':
+                    case.cross_border_consumer_case,
+                'duration_days': (case.closed_day - case.opened_day)
+                    if case.closed_day is not None else '',
+                'state_history': '|'.join(
+                    f'{day}:{state}' for day, state in case.state_history),
+                'outcome': assessment.outcome.value if assessment else '',
+                'confidence': assessment.confidence if assessment else '',
+                'rule_ids': '|'.join(assessment.rule_ids)
+                    if assessment else '',
+                'reasons': '|'.join(assessment.reasons)
+                    if assessment else '',
+                'policy_regime': sim.policy_regime.value,
+            })
+    print(f"Regulatory case ledger exported to '{csv_path}'.")

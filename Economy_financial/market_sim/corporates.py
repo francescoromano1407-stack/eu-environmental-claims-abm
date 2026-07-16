@@ -2,6 +2,13 @@
 Corporate policy layer (Part G, WP2 + WP5): the greenwashing agent and
 the NPV-driven continuous, reversible green transition.
 
+Compatibility note: the 3%-proxy/audit optimization documented below is
+the retained legacy Part-G experiment. With
+``enable_greenwashing_supervision`` active, disclosure is delegated to
+``corporate_communications.py`` and enforcement to
+``greenwashing_supervision.py``; the legacy audit and generic 3% penalty are
+bypassed. The real-transition machinery in this module remains active.
+
 `CorporatePolicy` replaces the passive corporate side (the old stepped
 heuristic in `Simulation._corporate_transitions` is DELETED) with one
 explicit agent per listing, strategy-typed in {honest, greenwasher,

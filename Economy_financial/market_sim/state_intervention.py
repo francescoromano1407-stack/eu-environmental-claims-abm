@@ -18,10 +18,11 @@ limit orders. It wields four instruments:
                             the regulatory threshold (WP3 institutional
                             reliance; harvesting channel (c) when the
                             true score is below it).
-  Penalties (WP1.5)      -- receives the 3%-of-turnover sanctions levied
-                            on detected greenwashers: corporate balance
-                            -> treasury, the exact mirror image of a
-                            subsidy.
+  Penalties              -- receives final sanctions from the applicable
+                            legal track: corporate balance -> treasury.
+                            The legacy WP1 path may still run its old proxy
+                            experiment, while the opt-in supervisor never
+                            treats the CSDDD 3% ceiling as a generic fine.
   Green bonds (WP6)      -- issues `GreenBond` instruments at par to the
                             CommercialBank and cash-rich traders when the
                             treasury runs low; the coupon is the policy
@@ -103,7 +104,10 @@ class State:
                  "bonds", "next_bond_id", "green_proceeds_dec",
                  "green_proceeds_spent_dec", "bonds_issued_dec",
                  "bonds_redeemed_dec", "coupons_paid_dec",
-                 "sovereign_stress_events")
+                 "sovereign_stress_events",
+                 # Part H: policy-experiment operating costs (hub /
+                 # connector). Generic outflows -- never earmarked money.
+                 "policy_cost_dec", "policy_cost_shortfalls")
 
     def __init__(self, ledger: "Trader"):
         # The ledger is a plain Trader shell (type='state' has no decision
@@ -124,6 +128,8 @@ class State:
         self.bonds_redeemed_dec = _ZERO
         self.coupons_paid_dec = _ZERO
         self.sovereign_stress_events = 0
+        self.policy_cost_dec = _ZERO
+        self.policy_cost_shortfalls = 0
 
     # -- WP6 earmarking primitives ------------------------------------------- #
     def _drain_earmarked(self, amount_dec: Decimal) -> None:
@@ -143,7 +149,9 @@ class State:
 
     # -- instrument 1: green-scaled corporate subsidies ---------------------- #
     def pay_subsidies(self, venues: list, current_day: int,
-                      regulation=None) -> float:
+                      regulation=None,
+                      use_supported_information: bool = False,
+                      raw_disclosure_counterfactual: bool = False) -> float:
         """
         Splits the epoch budget across companies proportionally to their
         DISCLOSED green scores and injects it into the corporate balance
@@ -157,7 +165,14 @@ class State:
         harvesting channels: channel (b), with the bond-funded fraction
         reclassified as channel (e) spillover.
         """
-        total_disclosed = sum(v.asset.disclosed_green_score for v in venues)
+        def policy_score(venue):
+            if use_supported_information \
+                    and not raw_disclosure_counterfactual:
+                return venue.asset.regulatory_eligibility_score
+            return venue.asset.disclosed_green_score
+
+        allocation_scores = {v.asset.symbol: policy_score(v) for v in venues}
+        total_disclosed = sum(allocation_scores.values())
         if total_disclosed <= 0.0:
             return 0.0
         budget = min(STATE_SUBSIDY_EPOCH_BUDGET_DEC, self.treasury_dec)
@@ -166,7 +181,8 @@ class State:
 
         # Counterfactual true-score allocation (wedge accounting, WP2.b).
         total_true = sum(v.asset.true_green_score for v in venues) \
-            if regulation is not None else 0.0
+            if regulation is not None and not use_supported_information \
+            else 0.0
 
         # Bond-funded fraction of THIS epoch's green spending (WP2.e).
         green_frac = 0.0
@@ -176,7 +192,7 @@ class State:
         paid = _ZERO
         for venue in venues:
             asset = venue.asset
-            share = asset.disclosed_green_score / total_disclosed
+            share = allocation_scores[asset.symbol] / total_disclosed
             subsidy_dec = (budget * Decimal(repr(round(share, 9)))).quantize(
                 CREDIT_CENT_DEC, rounding=ROUND_DOWN)
             if subsidy_dec <= _ZERO:
@@ -205,7 +221,9 @@ class State:
     # -- instrument 2: sovereign green fund (direct market investment) ------- #
     def invest_green(self, venues: list, current_day: int,
                      regulation=None,
-                     credibility_index: Optional[dict] = None) -> None:
+                     credibility_index: Optional[dict] = None,
+                     use_supported_information: bool = False,
+                     raw_disclosure_counterfactual: bool = False) -> None:
         """
         Crosses the spread with automated market BUYs on every asset whose
         DISCLOSED green score clears the regulatory sustainability
@@ -224,7 +242,10 @@ class State:
                      and credibility_index is not None)
         eligible = []
         for v in venues:
-            score = v.asset.disclosed_green_score
+            score = v.asset.regulatory_eligibility_score \
+                if (use_supported_information
+                    and not raw_disclosure_counterfactual) \
+                else v.asset.disclosed_green_score
             if use_kappa:
                 score *= credibility_index.get(v.symbol, 1.0)
             if score >= STATE_GREEN_THRESHOLD:
@@ -256,7 +277,7 @@ class State:
                 self.total_invested_dec += spent_dec
                 self.buy_events += 1
                 # Channel (c): flow earned purely by the wedge.
-                if regulation is not None \
+                if regulation is not None and not use_supported_information \
                         and venue.asset.true_green_score \
                         < STATE_GREEN_THRESHOLD:
                     policy = getattr(venue, "policy", None)
@@ -274,6 +295,28 @@ class State:
         self.treasury_dec += penalty_dec
         self.penalty_inflow_dec += penalty_dec
         self.ledger.cash += float(penalty_dec)
+
+    # -- Part H: policy-experiment operating costs ----------------------------- #
+    def pay_policy_cost(self, amount_dec: Decimal) -> Decimal:
+        """
+        Pays hub / connector implementation and operating costs to
+        external providers. GENERIC treasury spending: it must never
+        touch the earmarked green-bond sub-ledger (WP6 use-of-proceeds
+        constraint), so it is funded exclusively from
+        ``_unearmarked_dec()``. Underfunded amounts are skipped and
+        counted, never borrowed from earmarked money. Returns the amount
+        actually paid.
+        """
+        if amount_dec <= _ZERO:
+            return _ZERO
+        payable = min(amount_dec, max(_ZERO, self._unearmarked_dec()))
+        if payable < amount_dec:
+            self.policy_cost_shortfalls += 1
+        if payable > _ZERO:
+            self.treasury_dec -= payable
+            self.ledger.cash -= float(payable)
+            self.policy_cost_dec += payable
+        return payable
 
     # -- instrument 4 (Part G, WP6): sovereign green bonds --------------------- #
     def issue_green_bonds(self, current_day: int, policy_rate: float,

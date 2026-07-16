@@ -301,6 +301,8 @@ class CreditMarket:
         # required reserves stay exactly Decimal 0 (legacy-identical).
         self.esg_regulation = None
         self.collateral_asset = None
+        self.use_supported_environmental_information = False
+        self.raw_disclosure_counterfactual = False
 
         # Audit counters (Decimal canon; cash legs mirror into the float
         # ledger as internal transfers, so system cash is unaffected).
@@ -373,21 +375,25 @@ class CreditMarket:
         source of truth). Only bank-funded lines are bank exposures
         (P2P receivables sit on lender wallets, not the bank book).
 
-        Deliberate model risk (WP7): omega uses the DISCLOSED score. On a
-        scandal the asset's disclosed score snaps back to true (WP1.5),
-        omega jumps on the next daily cycle, RR spikes, and `can_fund`
-        may refuse new originations -- the systemic amplification is
-        observable through `reserve_shortfall_events` and the exported
-        reserve series. All arithmetic stays in the Decimal canon with
-        float mirrors, consistent with the ledger style.
+        In legacy WP7, omega uses the raw DISCLOSED score. Under the opt-in
+        supervisor, ``use_supported_environmental_information`` switches the
+        bank to the latest supported public estimate; raw reliance remains an
+        explicit counterfactual. All arithmetic stays in the Decimal canon.
         """
         regulation = self.esg_regulation
         bank = self.bank
         if regulation is None:
             return
         asset = self.collateral_asset
+        if (asset is not None
+                and self.use_supported_environmental_information
+                and not self.raw_disclosure_counterfactual):
+            collateral_score = asset.regulatory_eligibility_score
+        else:
+            collateral_score = asset.disclosed_green_score \
+                if asset is not None else 0.0
         omega = regulation.risk_weight(
-            asset.disclosed_green_score if asset is not None else 0.0)
+            collateral_score)
         omega_dec = Decimal(repr(round(omega, 9)))
 
         exposure_dec = _ZERO

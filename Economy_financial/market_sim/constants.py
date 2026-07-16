@@ -327,3 +327,196 @@ RESERVE_BASE_RATIO: Final[float] = float(RESERVE_BASE_RATIO_DEC)
 GREEN_RISK_WEIGHT_DISCOUNT: Final[float] = 0.50  # "Green supporting factor".
 OMEGA_MIN: Final[float] = 0.20               # Risk-weight floor (> 0).
 GREEN_BOND_OMEGA: Final[float] = 0.25        # Reserve weight of green bonds.
+
+# --------------------------------------------------------------------------- #
+# Part H -- three-regime State-intervention comparison. Strictly additive:
+# everything below is inert unless a Simulation selects a non-baseline
+# GreenwashingPolicyRegime (which itself requires
+# enable_greenwashing_supervision=True). Nothing above this line is
+# referenced or redefined here.
+#
+# LEGAL STATUS NOTE. Neither the SME pre-screening hub (Regime B) nor the
+# certified public green data connector (Regime C) is an obligation under
+# Directive (EU) 2026/470 or any other instrument in the model's baseline.
+# Both are PROPOSED NATIONAL POLICY EXPERIMENTS. The only legal anchors
+# used below are: the Art. 29ca voluntary-use reporting standards and the
+# 1000-employee "protected undertaking" line of the value-chain cap
+# (Directive (EU) 2026/470, recitals 12 and 21-22, Art. 2(4) and the new
+# Art. 29ca of Directive 2013/34/EU), which merely make a voluntary
+# pre-screening service *plausible* for that population -- they do not
+# require or endorse one. Every number below is EXPERIMENT unless marked
+# LEGAL-ANCHOR.
+# --------------------------------------------------------------------------- #
+
+# -- Regime B: SME voluntary-reporting algorithmic pre-screening hub -------- #
+# LEGAL-ANCHOR: eligibility mirrors the protected-undertaking employee line
+# (<= 1000 average employees, Art. 29ca / recital 12). The line scopes a
+# voluntary SERVICE here; it is never an exemption from consumer law,
+# investigations or substantiation duties.
+PRESCREEN_MAX_EMPLOYEES: Final[float] = 1000.0
+# EXPERIMENT: participation propensity per corporate strategy under the
+# default voluntary mode (multiplied under subsidized/auto-invite modes).
+PRESCREEN_UPTAKE_HONEST: Final[float] = 0.90
+PRESCREEN_UPTAKE_ADAPTIVE: Final[float] = 0.60
+PRESCREEN_UPTAKE_GREENWASHER: Final[float] = 0.35
+PRESCREEN_UPTAKE_SUBSIDIZED_BOOST: Final[float] = 1.20   # Multiplier.
+PRESCREEN_UPTAKE_AUTO_INVITE: Final[float] = 0.95        # Near-default-in.
+# EXPERIMENT: screening algorithm behaviour. `strictness` scales issue
+# severity thresholds; `noise` is the per-clean-claim probability of a
+# spurious informational flag (an excessively strict or noisy algorithm
+# must be able to increase withdrawal and greenhushing -- tested).
+PRESCREEN_STRICTNESS_DEFAULT: Final[float] = 0.50
+PRESCREEN_NOISE_DEFAULT: Final[float] = 0.08
+# EXPERIMENT: hub economics (cent-quantized Decimal canon).
+PRESCREEN_STATE_SETUP_COST_DEC: Final[Decimal] = Decimal("25000.00")
+PRESCREEN_STATE_COST_PER_SUBMISSION_DEC: Final[Decimal] = Decimal("40.00")
+PRESCREEN_FIRM_COST_PER_SUBMISSION_DEC: Final[Decimal] = Decimal("25.00")
+PRESCREEN_FIRM_REVISION_COST_DEC: Final[Decimal] = Decimal("60.00")
+PRESCREEN_PROCESSING_DELAY_DAYS: Final[int] = 5   # Reporting-delay metric.
+# EXPERIMENT: safe-harbour-like treatment is DISABLED by default and, even
+# when enabled, never covers deliberate concealment, prohibited practices,
+# repeated abuse, or claims contradicted by firm-known evidence.
+PRESCREEN_SAFE_HARBOR_ENABLED: Final[bool] = False
+
+# -- Regime C: certified public green data connector ------------------------- #
+# EXPERIMENT: connector economics.
+CONNECTOR_STATE_SETUP_COST_DEC: Final[Decimal] = Decimal("60000.00")
+CONNECTOR_STATE_DAILY_OPERATING_DEC: Final[Decimal] = Decimal("30.00")
+CONNECTOR_FIRM_INTEGRATION_COST_DEC: Final[Decimal] = Decimal("150.00")
+CONNECTOR_CYBER_GOVERNANCE_DAILY_DEC: Final[Decimal] = Decimal("10.00")
+# EXPERIMENT: measurement quality of certified sources. Connector data are
+# NOT infallible: relative meter error stays strictly positive, records
+# can go stale, facilities can be mismatched, registers can hold errors,
+# and the service can be down or suffer a cyber incident.
+CONNECTOR_METER_RELATIVE_ERROR: Final[float] = 0.010
+CONNECTOR_MISMATCH_PROBABILITY: Final[float] = 0.02
+CONNECTOR_MISMATCH_BIAS: Final[float] = 0.15     # Relative bias when wrong.
+CONNECTOR_STALE_PROBABILITY: Final[float] = 0.05
+CONNECTOR_STALE_DAYS: Final[int] = 120
+CONNECTOR_REGISTER_ERROR_PROBABILITY: Final[float] = 0.01
+CONNECTOR_CORRECTION_DELAY_DAYS: Final[int] = 60
+CONNECTOR_DOWNTIME_PROBABILITY: Final[float] = 0.01   # Per period+source.
+CONNECTOR_CYBER_INCIDENT_PROBABILITY: Final[float] = 0.002
+# EXPERIMENT: adoption propensity per strategy (greenwashers connect less
+# and selectively -- selective authorization is detectable, tested).
+CONNECTOR_UPTAKE_HONEST: Final[float] = 0.90
+CONNECTOR_UPTAKE_ADAPTIVE: Final[float] = 0.65
+CONNECTOR_UPTAKE_GREENWASHER: Final[float] = 0.40
+CONNECTOR_SELECTIVE_THRESHOLD: Final[float] = 0.60  # Authorized-share flag.
+# EXPERIMENT: reconciliation bands (standardized divergence z and relative
+# divergence). No sanction follows automatically from any band: material
+# classes only enter the existing procedurally fair supervision queue.
+RECONCILE_ROUNDING_REL: Final[float] = 0.005
+RECONCILE_NOISE_Z: Final[float] = 1.0
+RECONCILE_CORRECTION_Z: Final[float] = 2.5
+RECONCILE_SUSPICIOUS_Z: Final[float] = 4.0
+RECONCILE_REPEAT_THRESHOLD: Final[int] = 3
+
+# -- Comparative evaluation (Section 8/9 of the Part H specification) -------- #
+# EXPERIMENT: unit costs used by the research evaluator only.
+EVAL_REGULATOR_COST_PER_CASE: Final[float] = 120.0
+EVAL_REGULATOR_COST_PER_INVESTIGATION: Final[float] = 400.0
+EVAL_MATERIALITY_THRESHOLD: Final[float] = 0.02  # True-overstatement line.
+
+# --------------------------------------------------------------------------- #
+# Part I -- red-team remediation parameters. Strictly additive; nothing
+# above this line is referenced or redefined here. Classification of every
+# value is stated inline (LEGAL / STYLIZATION / EXPERIMENT).
+# --------------------------------------------------------------------------- #
+
+# -- I.1 sanction-scale bridge (P0) ------------------------------------------ #
+# STYLIZATION: the statutory `annual_net_turnover` (hundreds of millions
+# EUR) exists in LEGAL-SCOPE units and is used ONLY for scope tests (CSRD
+# thresholds, protected-undertaking lines). The simulation's monetary
+# economy (balances ~ float x price) is two orders of magnitude smaller,
+# so monetary sanction bases are computed on a SIMULATION-SCALE turnover
+# proxy: sim_turnover = SIM_TURNOVER_BALANCE_MULTIPLE * corporate balance.
+# The statutory ceiling RATES (1% experimental ordinary, 4% cross-border
+# consumer, 3% CSDDD) then apply to that proxy, keeping the legal logic
+# intact while making sanctions proportionate instead of confiscatory.
+# The multiple itself is a stylized turnover/net-assets ratio, not an
+# empirical estimate.
+SIM_TURNOVER_BALANCE_MULTIPLE: Final[float] = 1.5
+# EXPERIMENT: proportionality + repeat-offender escalation. A first
+# offence is bounded by the track ceiling; repeat severe findings scale
+# the experimental amount up to the cap multiple (never above the legal
+# ceiling and never below zero).
+PENALTY_REPEAT_ESCALATION_RATE: Final[float] = 0.50
+PENALTY_REPEAT_ESCALATION_CAP: Final[float] = 3.0
+
+# -- I.2 detector hardening (P1) ---------------------------------------------- #
+# EXPERIMENT: self-declared uncertainty is credible only up to this
+# multiple of the best evidence's standard error; beyond it the excess is
+# ignored for the z-test and the implausibility is recorded as a reason.
+UNCERTAINTY_PLAUSIBILITY_MULTIPLE: Final[float] = 2.0
+# EXPERIMENT: rolling escalation memory for repeated one-sided
+# sub-threshold findings (salami tactics). Escalates only patterns:
+# at least MIN_COUNT positively-diverging low-severity findings inside
+# WINDOW_DAYS whose mean standardized divergence exceeds MIN_MEAN_Z.
+REPEAT_PATTERN_WINDOW_DAYS: Final[int] = 365
+REPEAT_PATTERN_MIN_COUNT: Final[int] = 4
+REPEAT_PATTERN_MIN_MEAN_Z: Final[float] = 0.5
+# EXPERIMENT: two evidence records disagree materially when their gap
+# exceeds this multiple of their combined standard error; unresolved
+# cross-source conflicts route to INCONCLUSIVE, never to a sanction.
+EVIDENCE_CONFLICT_Z: Final[float] = 2.0
+
+# -- I.3 hub semantic validation (P1/P2) -------------------------------------- #
+# EXPERIMENT: a qualification is meaningful only if it is at least this
+# long AND mentions at least one recognised scoping token. Placeholder
+# qualifications ("x") no longer satisfy any qualification-based check.
+QUALIFICATION_MIN_LENGTH: Final[int] = 20
+QUALIFICATION_TOKENS: Final[tuple] = (
+    "boundary", "period", "scope", "uncertain", "estimate", "method",
+    "basis", "coverage")
+
+# -- I.4 discounting and horizon design (P2) ----------------------------------- #
+# EXPERIMENT: annual social discount rate applied to policy costs and
+# exposure-weighted harm in the comparative evaluator. Undiscounted
+# accounting ledgers are always preserved separately.
+SOCIAL_DISCOUNT_RATE_DEFAULT: Final[float] = 0.03
+
+# --------------------------------------------------------------------------- #
+# Part J -- paper-readiness completion. Strictly additive; nothing above
+# this line is referenced or redefined here. Classification of every value
+# is stated inline (LEGAL / STYLIZATION / EXPERIMENT). None of the numbers
+# below has a direct empirical calibration; every one is exposed to the
+# global sensitivity campaign (parameter_registry.py) unless noted.
+# --------------------------------------------------------------------------- #
+
+# -- J.1 evidence-conflict resolution procedure (Workstream C) ---------------- #
+# EXPERIMENT: procedural duration of one conflict investigation after a
+# capacity slot has been assigned to it (evidence re-requests, source
+# queries, file review).
+CONFLICT_RESOLUTION_DAYS: Final[int] = 20
+# EXPERIMENT: transparent queue priority of a conflict case. Deliberately
+# below whistleblower (1.0), complaint (0.95) and connector reconciliation
+# (0.90): resolving a data dispute matters, but corroborated suspicion
+# outranks it.
+CONFLICT_PRIORITY: Final[float] = 0.85
+# EXPERIMENT: if no re-verification evidence arrives within this window,
+# the conflict is decided on procedural credibility alone (and can then
+# only end in confirmation, a correction demand, or dismissal -- never in
+# an escalation, which requires corroborated evidence).
+CONFLICT_REVERIFICATION_TIMEOUT_DAYS: Final[int] = 90
+# EXPERIMENT: minimum confidence margin between the independent record and
+# the firm's own record for the credibility fallback to prefer one side.
+CONFLICT_CREDIBILITY_MARGIN: Final[float] = 0.15
+# EXPERIMENT: share of per-period investigation capacity reserved for
+# queued conflict investigations (a dedicated data-dispute desk), so an
+# endless stream of higher-priority enforcement cases cannot starve
+# disputes forever -- and conflicts still compete for ordinary slots when
+# the reserve is exhausted. 0.0 disables the reserve entirely.
+CONFLICT_CAPACITY_SHARE: Final[float] = 0.20
+# EXPERIMENT: stylized delay for a non-connector evidence source to answer
+# a supervisory re-verification request with a fresh measurement.
+SOURCE_REVERIFICATION_DELAY_DAYS: Final[int] = 30
+# EXPERIMENT: relative measurement error of a commissioned third-party
+# re-verification. The re-verifier is a measurement apparatus over the
+# physical ledger (exactly like the firm's own meters and the connector);
+# only its uncertain EvidenceRecord output reaches the supervisor.
+REVERIFICATION_RELATIVE_ERROR: Final[float] = 0.02
+# EXPERIMENT: research-evaluator unit cost of one conflict investigation
+# (between the ordinary case cost of 120 and the formal investigation
+# cost of 400 -- a data dispute needs specialist time but no litigation).
+EVAL_REGULATOR_COST_PER_CONFLICT: Final[float] = 250.0

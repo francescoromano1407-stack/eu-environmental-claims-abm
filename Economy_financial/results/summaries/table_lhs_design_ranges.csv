@@ -1,0 +1,29 @@
+parameter_id,name,location,low,high,default,classification,justification
+SAN-01,sim_turnover_balance_multiple,SupervisionParameters.sim_turnover_balance_multiple,0.5,3.0,1.5,STYLIZATION,Bridge between simulation-scale balances and the statutory turnover-based ceiling rates (Part I.1).
+SAN-02,benefit_multiplier,SupervisionParameters.benefit_multiplier,0.5,3.0,1.5,EXPERIMENT,Disgorgement-plus factor on the estimated benefit of the misleading claim.
+SAN-03,affected_revenue_rate,SupervisionParameters.affected_revenue_rate,0.005,0.06,0.02,EXPERIMENT,Revenue-linked component of the experimental sanction formula.
+CAP-01,evidence_request_capacity,SupervisionParameters.evidence_request_capacity,5,40,20,EXPERIMENT,Screening capacity per reporting period.
+CAP-02,investigation_capacity,SupervisionParameters.investigation_capacity,1,12,5,EXPERIMENT,"Formal-investigation capacity per period, shared with conflict investigations (Part J)."
+CAP-03,random_surveillance_share,SupervisionParameters.random_surveillance_share,0.0,0.3,0.1,EXPERIMENT,Random-surveillance draw deterring pure risk-score gaming.
+CAP-04,correction_window_days,SupervisionParameters.correction_window_days,10,90,30,EXPERIMENT,First-time correctable errors receive this compliance window.
+CAP-05,regulatory_strictness,Simulation(regulatory_strictness=...),0.0,1.0,0.55,EXPERIMENT,Perceived enforcement strictness entering the corporate communication optimizer.
+CNF-01,conflict_capacity_share,SupervisionParameters.conflict_capacity_share,0.0,0.6,0.2,EXPERIMENT,Investigation-capacity share reserved for evidence-conflict disputes (dedicated data-dispute desk).
+CNF-02,conflict_resolution_days,SupervisionParameters.conflict_resolution_days,5,60,20,EXPERIMENT,Procedural duration of one conflict investigation.
+HUB-01,hub_participation_scale,PrescreeningParameters.participation_scale,0.2,1.5,1.0,EXPERIMENT,Scales every strategy's voluntary participation propensity.
+HUB-02,hub_strictness,PrescreeningParameters.strictness,0.1,0.95,0.5,EXPERIMENT,Issue-severity threshold scaling of the screening algorithm.
+HUB-03,hub_noise,PrescreeningParameters.noise,0.0,0.5,0.08,EXPERIMENT,Spurious-flag probability of the screening algorithm.
+HUB-04,hub_processing_delay_days,PrescreeningParameters.processing_delay_days,0,20,5,EXPERIMENT,Operational review delay withholding drafts from publication.
+CON-01,connector_coverage_scale,ConnectorParameters.coverage_scale,0.5,1.2,1.0,EXPERIMENT,"Scales each register's observational coverage (clamped to [0.05, 1])."
+CON-02,connector_mismatch_probability,ConnectorParameters.mismatch_probability,0.0,0.1,0.02,EXPERIMENT,Wrong facility/firm matching probability per transfer.
+CON-03,connector_register_error_probability,ConnectorParameters.register_error_probability,0.0,0.05,0.01,EXPERIMENT,Register-error probability per transfer (correction lifecycle follows).
+CON-04,connector_stale_probability,ConnectorParameters.stale_probability,0.0,0.25,0.05,EXPERIMENT,Probability a transfer returns a genuinely old reading.
+CON-05,connector_downtime_probability,ConnectorParameters.downtime_probability,0.0,0.1,0.01,EXPERIMENT,Per-period-and-source downtime probability.
+CON-06,connector_correction_delay_days,ConnectorParameters.correction_delay_days,10,120,60,EXPERIMENT,Register-error correction turnaround (also answers supervisory re-verification requests).
+DEM-01,consumer_preference_scale,Simulation(consumer_preference_scale=...),0.5,1.5,1.0,STYLIZATION,Scales every segment's environmental preference.
+DEM-02,consumer_discrepancy_sensitivity,Simulation(consumer_discrepancy_sensitivity=...),0.25,2.5,1.0,STYLIZATION,Scales the utility penalty of a perceived claim/evidence divergence.
+INV-01,investor_sophisticated_fraction,Simulation(investor_sophisticated_fraction=...),0.05,0.8,0.3,STYLIZATION,Share of fundamentalists inspecting linked evidence.
+INV-02,investor_controversy_scale,Simulation(investor_controversy_scale=...),0.25,2.0,1.0,STYLIZATION,Scales the controversy discount in investor fair values.
+WRK-01,workforce_trust_loss_rate,WorkforceState.trust_loss_rate,0.1,1.0,0.45,STYLIZATION,Trust lost per unit of observable internal discrepancy.
+WRK-02,workforce_trust_recovery_rate,WorkforceState.trust_recovery_rate,0.0005,0.01,0.0015,STYLIZATION,Daily recovery toward the 0.85 anchor on quiet truthful days.
+GHU-01,compliance_burden_scale,Simulation(compliance_burden_scale=...),0.25,2.5,1.0,STYLIZATION,Scales the perceived compliance burden that chills voluntary truthful communication (greenhushing driver).
+EVL-01,social_discount_rate,PolicyOutcomeEvaluator(discount_rate_annual=...),0.0,0.07,0.03,EXPERIMENT,Discounts policy costs and exposure-weighted harm for comparison; undiscounted ledgers always preserved.

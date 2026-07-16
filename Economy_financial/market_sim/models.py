@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import math
 import random
+from datetime import date
 from typing import Optional
 
 from decimal import Decimal
@@ -27,6 +28,16 @@ from market_sim.constants import (
     LOG_CORPORATE_BALANCE_FLOOR,
     REG_OMISSION_RATE_DEFAULT,
 )
+from market_sim.environmental_claims import (
+    ClaimAssessment,
+    EnvironmentalClaim,
+    EnvironmentalFactVector,
+    EvidenceRecord,
+    FirmProfile,
+    PublicEnvironmentalSignal,
+    ReportingOmission,
+)
+from market_sim.workforce import WorkforceState
 
 # Bounded history horizon: price/balance histories are capped so unbounded
 # runs cannot grow the heap (and thrash the GC) indefinitely. The macro
@@ -138,7 +149,13 @@ class Asset:
                  fundamental_vol: float = 0.005,
                  green_score: float = 0.0,
                  firm_size: Optional[float] = None,
-                 omission_rate: float = REG_OMISSION_RATE_DEFAULT):
+                 omission_rate: float = REG_OMISSION_RATE_DEFAULT,
+                 annual_net_turnover: Optional[float] = None,
+                 average_employees: Optional[float] = None,
+                 sector: str = "general",
+                 environmental_facts: Optional[EnvironmentalFactVector] = None,
+                 fact_period_start: date = date(2026, 1, 1),
+                 fact_period_end: date = date(2026, 12, 31)):
         self.symbol = symbol
         # Part F / Part G: sustainability profile in [0, 1]. At listing the
         # disclosed score equals the true score (no wedge yet); the wedge
@@ -167,6 +184,43 @@ class Asset:
         # corporate balance at listing, overridable per asset_profile).
         self.firm_size = float(firm_size) if firm_size is not None \
             else initial_balance
+        # The opt-in supervision layer uses explicit legal scope variables.
+        # ``firm_size`` remains untouched for legacy Part-G experiments.
+        self.annual_net_turnover = max(
+            0.0, float(annual_net_turnover)) if annual_net_turnover is not None \
+            else 300_000_000.0
+        self.average_employees = max(
+            0.0, float(average_employees)) if average_employees is not None \
+            else 800.0
+        self.sector = str(sector)
+        self.firm_profile = FirmProfile(
+            symbol=self.symbol,
+            green_score=score,
+            strategy="honest",
+            annual_net_turnover=self.annual_net_turnover,
+            average_employees=self.average_employees,
+            sector=self.sector,
+            legacy_firm_size=self.firm_size if firm_size is not None else None,
+        )
+        self.environmental_facts = environmental_facts \
+            if environmental_facts is not None else \
+            EnvironmentalFactVector.from_green_score(
+                score, fact_period_start, fact_period_end,
+                self.annual_net_turnover, sector=self.sector)
+        self.workforce = WorkforceState(self.average_employees)
+        self.claim_history: list[EnvironmentalClaim] = []
+        self.evidence_history: list[EvidenceRecord] = []
+        self.assessment_history: list[ClaimAssessment] = []
+        self.reporting_omissions: list[ReportingOmission] = []
+        self.public_environmental_signals: list[PublicEnvironmentalSignal] = []
+        self.supported_green_score = score
+        self.greenhushing_gap = 0.0
+        self.q_truthful_benchmark = 0.0
+        self.real_environmental_investment_spend = 0.0
+        self.communication_preparation_spend = 0.0
+        self.environmental_evidence_spend = 0.0
+        self.last_workforce_claim_id: Optional[str] = None
+        self.last_workforce_public_signal_day = -10**9
         self.price_history: collections.deque = collections.deque(
             [initial_price], maxlen=HISTORY_MAXLEN)
         self.balance_history: collections.deque = collections.deque(
@@ -221,6 +275,8 @@ class Asset:
         self.balance -= cost
         self._true_green_score = min(
             1.0, self._true_green_score + increment)
+        self.environmental_facts.evolve_toward_score(
+            self._true_green_score, self.annual_net_turnover)
         if self._disclosed_green_score < self._true_green_score:
             self._disclosed_green_score = self._true_green_score
         self.last_transition_day = current_day
@@ -228,6 +284,8 @@ class Asset:
     def set_true_score(self, value: float) -> None:
         """WP5 continuous-dynamics write path for the physical score."""
         self._true_green_score = min(1.0, max(0.0, value))
+        self.environmental_facts.evolve_toward_score(
+            self._true_green_score, self.annual_net_turnover)
 
     def set_disclosed_score(self, value: float, current_day: int) -> None:
         """WP2 disclosure write path for the reported score. Upward
@@ -246,6 +304,11 @@ class Asset:
         self._disclosed_green_score = self._true_green_score
         self.lawful_omission = 0.0
         self.last_scandal_day = current_day
+
+    @property
+    def regulatory_eligibility_score(self) -> float:
+        """Latest supported public estimate, never the latent fact vector."""
+        return min(1.0, max(0.0, self.supported_green_score))
 
     # `balance` is a property so external mutations (dividend payouts) keep
     # the log-space OU state consistent without any log() in the daily loop.

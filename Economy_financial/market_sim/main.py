@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import random
 
-from market_sim.simulation import Simulation, export_simulation_metrics
+from market_sim.simulation import (
+    Simulation,
+    export_claim_audit_log,
+    export_regulatory_cases,
+    export_simulation_metrics,
+)
 
 # Reproducibility anchor: seed 42 reproduces the validated reference run
 # (price corridor ~80-130 around the drifting fundamental, no stagnation,
@@ -34,11 +39,14 @@ def main(seed: int = DEFAULT_SEED) -> Simulation:
                      initial_shares=100, initial_price=100.0,
                      rf_rate=0.03, days=2000, num_manipulators=2,
                      enable_credit=True,
-                     enable_esg=True,          # <--- ATTIVALO QUI
-                     enable_regulation=True)   # Part G: Dir. (EU) 2026/470
+                     enable_esg=True,
+                     enable_regulation=True,
+                     enable_greenwashing_supervision=True)
 
     sim.run()
     export_simulation_metrics(sim, "simulation_results.csv")
+    export_claim_audit_log(sim, "environmental_claim_audit_log.csv")
+    export_regulatory_cases(sim, "greenwashing_regulatory_cases.csv")
     sim.plot_dashboard("market_simulation_dashboard.png")
     return sim
 

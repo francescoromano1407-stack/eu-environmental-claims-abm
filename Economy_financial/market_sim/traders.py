@@ -34,6 +34,7 @@ from market_sim.constants import (
     STATE_GREEN_THRESHOLD,
     WEDGE_SUSPICION_HAIRCUT,
 )
+from market_sim.environmental_claims import InvestorEnvironmentalContext
 from market_sim.models import LimitOrder, MarketOrder
 
 if TYPE_CHECKING:
@@ -282,7 +283,10 @@ class Trader:
                      ema_fast: float, ema_slow: float, ema_ready: bool,
                      book_imbalance: float, rel_volatility: float,
                      green_score: float = 0.0, credibility: float = 1.0,
-                     suspicious: bool = False) -> Optional[tuple]:
+                     suspicious: bool = False,
+                     environmental_context: Optional[
+                         InvestorEnvironmentalContext] = None) \
+            -> Optional[tuple]:
         """
         Returns (order_type, side, price, quantity) or None.
 
@@ -321,13 +325,17 @@ class Trader:
                 return None
         return handler(current_price, v_fundamental, ema_fast, ema_slow,
                        ema_ready, book_imbalance, rel_volatility,
-                       green_score, credibility, suspicious)
+                       green_score, credibility, suspicious,
+                       environmental_context)
 
     def _decide_noise(self, current_price: float, v_fundamental: float,
                       ema_fast: float, ema_slow: float, ema_ready: bool,
                       imbalance: float, rel_volatility: float,
                       green_score: float = 0.0, credibility: float = 1.0,
-                      suspicious: bool = False) -> Optional[tuple]:
+                      suspicious: bool = False,
+                      environmental_context: Optional[
+                          InvestorEnvironmentalContext] = None) \
+            -> Optional[tuple]:
         """
         Random trader, mildly herding on visible book pressure.
 
@@ -365,7 +373,10 @@ class Trader:
                                imbalance: float, rel_volatility: float,
                                green_score: float = 0.0,
                                credibility: float = 1.0,
-                               suspicious: bool = False) -> Optional[tuple]:
+                               suspicious: bool = False,
+                               environmental_context: Optional[
+                                   InvestorEnvironmentalContext] = None) \
+            -> Optional[tuple]:
         """
         Part B, fix 2: elastic probabilistic corridor.
         Part F / Part G (WP3): greenium-adjusted fair value on the
@@ -393,11 +404,9 @@ class Trader:
         """
         if v_fundamental <= 0.0 or current_price <= 0.0:
             return None
-        effective_score = credibility * green_score
-        if suspicious and self.sophisticated:
-            effective_score *= (1.0 - WEDGE_SUSPICION_HAIRCUT)
-        v_green_fair = v_fundamental * (1.0 + self.GREENIUM_GAMMA
-                                        * effective_score)
+        v_green_fair = self.environmental_fair_value(
+            v_fundamental, green_score, credibility, suspicious,
+            environmental_context)
 
         mispricing = (v_green_fair - current_price) / v_green_fair
         band = min(self.FUND_BAND_MAX,
@@ -427,7 +436,33 @@ class Trader:
                     current_price * (1.0 - 0.5 * band))
         return ('LIMIT', 'SELL', max(0.01, round(limit, 2)), qty)
 
-    def _decide_chartist(self, current_price: float, v_fundamental: float, ema_fast: float, ema_slow: float, ema_ready: bool, imbalance: float, rel_volatility: float, green_score: float = 0.0, credibility: float = 1.0, suspicious: bool = False) -> Optional[tuple]:
+    def environmental_fair_value(
+            self, v_fundamental: float, green_score: float = 0.0,
+            credibility: float = 1.0, suspicious: bool = False,
+            environmental_context: Optional[
+                InvestorEnvironmentalContext] = None) -> float:
+        """Fair value from accessible environmental information.
+
+        With no context this is exactly the legacy Part-G expression.  The
+        opt-in context contains a posterior and a separate controversy
+        discount, avoiding double-counting the same signal as both a lower
+        score and a second credibility haircut.
+        """
+        if environmental_context is None:
+            effective_score = credibility * green_score
+            if suspicious and self.sophisticated:
+                effective_score *= (1.0 - WEDGE_SUSPICION_HAIRCUT)
+            return v_fundamental * (1.0 + self.GREENIUM_GAMMA
+                                    * effective_score)
+        context = environmental_context
+        effective_score = context.posterior_score * context.credibility
+        controversy = context.controversy_discount \
+            * (1.0 if self.sophisticated else 0.40)
+        return (v_fundamental
+                * (1.0 + self.GREENIUM_GAMMA * effective_score)
+                * (1.0 - controversy))
+
+    def _decide_chartist(self, current_price: float, v_fundamental: float, ema_fast: float, ema_slow: float, ema_ready: bool, imbalance: float, rel_volatility: float, green_score: float = 0.0, credibility: float = 1.0, suspicious: bool = False, environmental_context: Optional[InvestorEnvironmentalContext] = None) -> Optional[tuple]:
         """
         CONTRARIAN MEAN-REVERSION TRADER (Optimized)
         Invece di inseguire il trend in ritardo, vende i picchi e compra i minimi.

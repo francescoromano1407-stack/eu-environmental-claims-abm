@@ -1,39 +1,29 @@
-"""
-Regulatory layer (Part G, WP1): stylized Directive (EU) 2026/470.
+"""EU legal calendar plus the retained legacy Part-G policy object.
 
-`ESGRegulation` is the single source of truth for every regulatory
-parameter of the greenwashing framework. The `State`, the `CreditMarket` /
-`CommercialBank`, the traders, the corporate policies (WP2/WP5) and the
-green-bond module (WP6) query THIS object rather than reading constants
-directly, so a policy experiment (pre/post Omnibus, stricter assurance,
-higher penalty cap...) changes exactly one object.
+``LegalRegime`` is the calendar-aware source used by the opt-in prevention
+system.  It keeps UCPD consumer law, Directive (EU) 2024/825, CSRD reporting,
+financial-market communications and CSDDD due diligence on distinct tracks.
+It applies the amended CSRD scope through explicit turnover *and* employee
+thresholds.
 
-Stylized facts encoded here, each mapped to a named constant and tagged
-with its source article (see `constants.py` for the full STYLIZATION
-comments):
-
-  1. Size-scoped mandatory disclosure    Art. 2(4) / Art. 19a 2013/34/EU
-  2. Disclosed vs. true score wedge      (framework consequence of 1+3)
-  3. Limited assurance only              Art. 1(3), recital 5
-  4. Omission exemptions                 Art. 2(4)(b)(iii)
-  5. Penalty cap: 3% of turnover         Art. 4(19) / CSDDD Art. 27(4)
-  6. No mandatory transition plans       recital 47
-  7. Phase-in / enforcement timing       Art. 3, Art. 5
-
-Conservation identity (WP1.5, asserted in the Simulation's debug audit):
-every penalty euro leaves a corporate balance and lands in the State
-treasury -- `sum(penalties) == treasury_penalty_inflow_dec`, so sanctions
-are a transfer, never a sink.
-
-Dependency position: imports `constants` and the stdlib only; sits beside
-`constants` at the bottom of the package graph.
+``ESGRegulation`` remains for compatibility with the original model's green
+capital, green-bond and reserve experiments.  Its audit lottery and 3% proxy
+penalty are legacy mechanics only and are bypassed when
+``enable_greenwashing_supervision`` is active.  The new supervisor provides
+limited assurance to every mandatory report and never uses the CSDDD 3%
+ceiling for an ordinary greenwashing claim.
 """
 
 from __future__ import annotations
 
 import math
 import random
+from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import ROUND_DOWN, Decimal
+from typing import Optional
+
+from market_sim.environmental_claims import FirmProfile, RuleAuthority
 
 from market_sim.constants import (
     CREDIT_CENT_DEC,
@@ -57,6 +47,79 @@ from market_sim.constants import (
 )
 
 _ZERO = Decimal("0")
+
+
+@dataclass(frozen=True)
+class LegalRegime:
+    """Calendar and scope rules for the opt-in EU supervision model.
+
+    Dates are application dates in the model, not claims that every Member
+    State will implement procedures identically.  ``csrd_new_scope_date`` is
+    therefore injectable for national-transposition scenarios.
+    """
+
+    simulation_start_date: date = date(2026, 1, 1)
+    empowering_consumers_application_date: date = date(2026, 9, 27)
+    csrd_new_scope_date: date = date(2027, 3, 19)
+    csddd_application_date: date = date(2029, 7, 26)
+    green_claims_preverification_enabled: bool = False
+    csrd_turnover_threshold: float = 450_000_000.0
+    csrd_employee_threshold: float = 1000.0
+
+    def date_for_day(self, day: int) -> date:
+        """Map simulation day 1 to ``simulation_start_date``."""
+        return self.simulation_start_date + timedelta(days=max(0, day - 1))
+
+    def ucpd_active(self, on_date: date) -> bool:
+        # The base UCPD is part of the background law throughout the model.
+        return True
+
+    def empowering_consumers_active(self, on_date: date) -> bool:
+        return on_date >= self.empowering_consumers_application_date
+
+    def csrd_active(self, on_date: date) -> bool:
+        return on_date >= self.csrd_new_scope_date
+
+    def csddd_active(self, on_date: date) -> bool:
+        return on_date >= self.csddd_application_date
+
+    def green_claims_preverification_active(self, on_date: date) -> bool:
+        return bool(self.green_claims_preverification_enabled)
+
+    def csrd_in_scope(self, profile: FirmProfile, on_date: date,
+                      average_employees: Optional[float] = None,
+                      group_scope: bool = False) -> bool:
+        """Strict conjunction required by the model's post-Omnibus scope.
+
+        The annual historical workforce average can be supplied by the
+        workforce ledger.  A one-day headcount reduction therefore cannot
+        instantaneously remove the reporting obligation.
+        """
+        if group_scope:
+            turnover = profile.group_annual_net_turnover
+            employees = profile.group_average_employees
+            if turnover is None or employees is None:
+                return False
+        else:
+            turnover = profile.annual_net_turnover
+            employees = profile.average_employees if average_employees is None \
+                else float(average_employees)
+        return (self.csrd_active(on_date)
+                and turnover > self.csrd_turnover_threshold
+                and employees > self.csrd_employee_threshold)
+
+    def active_authorities(self, on_date: date) -> tuple[RuleAuthority, ...]:
+        authorities = [RuleAuthority.UCPD_BASE,
+                       RuleAuthority.MARKET_DISCLOSURE]
+        if self.empowering_consumers_active(on_date):
+            authorities.append(RuleAuthority.EMPOWERING_CONSUMERS_2024_825)
+        if self.csrd_active(on_date):
+            authorities.append(RuleAuthority.CSRD)
+        if self.csddd_active(on_date):
+            authorities.append(RuleAuthority.CSDDD)
+        if self.green_claims_preverification_active(on_date):
+            authorities.append(RuleAuthority.GREEN_CLAIMS_COUNTERFACTUAL)
+        return tuple(authorities)
 
 
 class ESGRegulation:
