@@ -41,5 +41,6 @@ desktop.ini
 ~$*.docx
 _qa_*/
 rendered/
+.~lock.*#
 
 # Intentionally not ignored: source, DOCX manuscripts, results/, and provenance/
