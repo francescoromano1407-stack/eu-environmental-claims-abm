@@ -1,0 +1,36 @@
+{
+  "audit_schema": "paper-price-feedback-materiality-audit/v1",
+  "audit_utc": "2026-07-16T21:50:24+00:00",
+  "price_feedback_audit_path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\audits\\firm_price_feedback_audit.json",
+  "price_feedback_audit_final_classification": "direct_price_feedback_detected",
+  "relevant_firm_decision_classifications": {
+    "greenwashing_disclosure": "no_price_feedback_detected",
+    "investment": "no_price_feedback_detected",
+    "reputation_management": "inconclusive_static_analysis"
+  },
+  "documents_scanned": [
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\Francesco_Romano_EU_Environmental_Claims_ABM_Paper_revised.docx",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\DATA_DICTIONARY.md",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\EU_GREENWASHING_MODEL.md",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\FINANCIAL_VALIDATION_CAMPAIGN.md",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\PARAMETER_REGISTRY.md",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\PUBLICATION_READINESS_REVIEW.md",
+    "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\REPRODUCIBILITY.md"
+  ],
+  "claim_evidence": [
+    {
+      "document": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\docs\\PUBLICATION_READINESS_REVIEW.md",
+      "claim_type": "possible_price_to_firm_claim",
+      "excerpt": "ed dates, scope boundaries, and explicit experimental institutions. 4. **Model:** purpose, agents, information boundaries, corporate communication, enforcement and conflict, market feedback. Move implementation detail to an ODD supplement. 5. **Experimental design and validation:** paired CRN design, LHS, outcomes, financial stylized-facts validation, robustnes"
+    }
+  ],
+  "price_to_firm_claim_human_confirmed": false,
+  "materiality_classification": "potential_material_claim_model_mismatch_requires_human_review",
+  "conclusion": "Keyword evidence suggests that the paper may invoke price or market feedback near firm environmental decisions, but the static audit found no evidenced own-share feedback in disclosure, investment, or reputation decisions. Human review must confirm that this is a causal paper claim before treating it as a material mismatch.",
+  "required_action": "Retain the limitation statement and avoid claiming that equity prices directly discipline environmental decisions unless a separate runtime audit establishes that channel.",
+  "limitations": [
+    "Claim detection is keyword-based and conservative; human review of every flagged excerpt is required.",
+    "Static source analysis identifies explicit dependencies, not realized runtime causality or effect magnitude.",
+    "This audit does not execute a simulation or assess the empirical realism of any mechanism."
+  ]
+}

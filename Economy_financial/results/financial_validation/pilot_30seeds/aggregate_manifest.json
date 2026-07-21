@@ -1,0 +1,353 @@
+{
+  "anomalous_seed_outputs": [],
+  "bytes_per_seed": {
+    "seed_001": 34832507,
+    "seed_002": 38921889,
+    "seed_003": 34808524,
+    "seed_004": 36306251,
+    "seed_005": 36069576,
+    "seed_006": 35624488,
+    "seed_007": 34971415,
+    "seed_008": 36415580,
+    "seed_009": 37459321,
+    "seed_010": 36943712,
+    "seed_011": 37517430,
+    "seed_012": 35291178,
+    "seed_013": 35785497,
+    "seed_014": 37622188,
+    "seed_015": 37985121,
+    "seed_016": 36367608,
+    "seed_017": 33290346,
+    "seed_018": 37244533,
+    "seed_019": 36887073,
+    "seed_020": 35748505,
+    "seed_021": 36424480,
+    "seed_022": 34997831,
+    "seed_023": 37213555,
+    "seed_024": 35708681,
+    "seed_025": 35249122,
+    "seed_026": 35742751,
+    "seed_027": 35766731,
+    "seed_028": 36818475,
+    "seed_029": 35759872,
+    "seed_030": 36665682
+  },
+  "campaign_configuration": {
+    "burn_in": 2000,
+    "horizon": 10000,
+    "market_seed_base": 20260716,
+    "num_traders": 30,
+    "output_root": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\financial_validation\\pilot_5seeds",
+    "regime": "current_eu_supervision",
+    "safety_factor": 1.25,
+    "seed_list": null,
+    "seeds": 30,
+    "supervision_seed_base": 104729,
+    "write_order_book_events": true
+  },
+  "code_provenance": {
+    "git_commit": "00134a694e653fc2ce74b62eab1e8c6e9d0f67f7",
+    "python_source_tree_sha256": "a89974be52ac2aafa9d15e440da3322c05591f6b04aaf7dc16cb94f21635f2c6",
+    "working_tree_dirty": true,
+    "working_tree_status_sha256": "6035e8a9e6439f3cab819808f19ee2582260a8c05ed72658caf2bf6b15bab7c1"
+  },
+  "failures": [],
+  "manifest_schema": "financial-validation-campaign/v1",
+  "missing": [],
+  "newly_run": [
+    "seed_017"
+  ],
+  "notice": "Simulation-based stylized-facts validation; not empirical calibration, empirical validation, causal estimation, or a real-world forecast.",
+  "pending": [],
+  "per_seed_elapsed_seconds": {
+    "seed_001": 70.95991000000049,
+    "seed_002": 66.17987730000004,
+    "seed_003": 72.93176909999966,
+    "seed_004": 75.04401720000078,
+    "seed_005": 71.54211929999929,
+    "seed_006": 68.95310059999974,
+    "seed_007": 73.91306819999954,
+    "seed_008": 81.9837490000009,
+    "seed_009": 73.15913330000149,
+    "seed_010": 69.32271630000105,
+    "seed_011": 67.46754570000121,
+    "seed_012": 78.40765920000013,
+    "seed_013": 71.38681290000022,
+    "seed_014": 62.189288400000805,
+    "seed_015": 65.90985329999967,
+    "seed_016": 72.79109099999914,
+    "seed_017": 78.2158599000013,
+    "seed_018": 75.22271910000018,
+    "seed_019": 76.21240989999933,
+    "seed_020": 73.12518270000146,
+    "seed_021": 76.91858839999986,
+    "seed_022": 83.97382199999993,
+    "seed_023": 72.6647821000006,
+    "seed_024": 79.2528601999984,
+    "seed_025": 77.79480120000153,
+    "seed_026": 77.7937968999995,
+    "seed_027": 70.66740690000006,
+    "seed_028": 78.0297214000002,
+    "seed_029": 81.03892260000066,
+    "seed_030": 70.29565639999964
+  },
+  "projection_to_30_seeds": {
+    "available": false,
+    "label": "planning estimate unavailable until exactly five valid pilot seeds complete"
+  },
+  "quarantined": [],
+  "rejected": [],
+  "reused": [
+    "seed_001",
+    "seed_002",
+    "seed_003",
+    "seed_004",
+    "seed_005",
+    "seed_006",
+    "seed_007",
+    "seed_008",
+    "seed_009",
+    "seed_010",
+    "seed_011",
+    "seed_012",
+    "seed_013",
+    "seed_014",
+    "seed_015",
+    "seed_016",
+    "seed_018",
+    "seed_019",
+    "seed_020",
+    "seed_021",
+    "seed_022",
+    "seed_023",
+    "seed_024",
+    "seed_025",
+    "seed_026",
+    "seed_027",
+    "seed_028",
+    "seed_029",
+    "seed_030"
+  ],
+  "seed_schedule": [
+    {
+      "identifier": "seed_001",
+      "market_seed": 20260716,
+      "ordinal": 1,
+      "supervision_seed": 104729
+    },
+    {
+      "identifier": "seed_002",
+      "market_seed": 21260719,
+      "ordinal": 2,
+      "supervision_seed": 209458
+    },
+    {
+      "identifier": "seed_003",
+      "market_seed": 22260722,
+      "ordinal": 3,
+      "supervision_seed": 314187
+    },
+    {
+      "identifier": "seed_004",
+      "market_seed": 23260725,
+      "ordinal": 4,
+      "supervision_seed": 418916
+    },
+    {
+      "identifier": "seed_005",
+      "market_seed": 24260728,
+      "ordinal": 5,
+      "supervision_seed": 523645
+    },
+    {
+      "identifier": "seed_006",
+      "market_seed": 25260731,
+      "ordinal": 6,
+      "supervision_seed": 628374
+    },
+    {
+      "identifier": "seed_007",
+      "market_seed": 26260734,
+      "ordinal": 7,
+      "supervision_seed": 733103
+    },
+    {
+      "identifier": "seed_008",
+      "market_seed": 27260737,
+      "ordinal": 8,
+      "supervision_seed": 837832
+    },
+    {
+      "identifier": "seed_009",
+      "market_seed": 28260740,
+      "ordinal": 9,
+      "supervision_seed": 942561
+    },
+    {
+      "identifier": "seed_010",
+      "market_seed": 29260743,
+      "ordinal": 10,
+      "supervision_seed": 1047290
+    },
+    {
+      "identifier": "seed_011",
+      "market_seed": 30260746,
+      "ordinal": 11,
+      "supervision_seed": 1152019
+    },
+    {
+      "identifier": "seed_012",
+      "market_seed": 31260749,
+      "ordinal": 12,
+      "supervision_seed": 1256748
+    },
+    {
+      "identifier": "seed_013",
+      "market_seed": 32260752,
+      "ordinal": 13,
+      "supervision_seed": 1361477
+    },
+    {
+      "identifier": "seed_014",
+      "market_seed": 33260755,
+      "ordinal": 14,
+      "supervision_seed": 1466206
+    },
+    {
+      "identifier": "seed_015",
+      "market_seed": 34260758,
+      "ordinal": 15,
+      "supervision_seed": 1570935
+    },
+    {
+      "identifier": "seed_016",
+      "market_seed": 35260761,
+      "ordinal": 16,
+      "supervision_seed": 1675664
+    },
+    {
+      "identifier": "seed_017",
+      "market_seed": 36260764,
+      "ordinal": 17,
+      "supervision_seed": 1780393
+    },
+    {
+      "identifier": "seed_018",
+      "market_seed": 37260767,
+      "ordinal": 18,
+      "supervision_seed": 1885122
+    },
+    {
+      "identifier": "seed_019",
+      "market_seed": 38260770,
+      "ordinal": 19,
+      "supervision_seed": 1989851
+    },
+    {
+      "identifier": "seed_020",
+      "market_seed": 39260773,
+      "ordinal": 20,
+      "supervision_seed": 2094580
+    },
+    {
+      "identifier": "seed_021",
+      "market_seed": 40260776,
+      "ordinal": 21,
+      "supervision_seed": 2199309
+    },
+    {
+      "identifier": "seed_022",
+      "market_seed": 41260779,
+      "ordinal": 22,
+      "supervision_seed": 2304038
+    },
+    {
+      "identifier": "seed_023",
+      "market_seed": 42260782,
+      "ordinal": 23,
+      "supervision_seed": 2408767
+    },
+    {
+      "identifier": "seed_024",
+      "market_seed": 43260785,
+      "ordinal": 24,
+      "supervision_seed": 2513496
+    },
+    {
+      "identifier": "seed_025",
+      "market_seed": 44260788,
+      "ordinal": 25,
+      "supervision_seed": 2618225
+    },
+    {
+      "identifier": "seed_026",
+      "market_seed": 45260791,
+      "ordinal": 26,
+      "supervision_seed": 2722954
+    },
+    {
+      "identifier": "seed_027",
+      "market_seed": 46260794,
+      "ordinal": 27,
+      "supervision_seed": 2827683
+    },
+    {
+      "identifier": "seed_028",
+      "market_seed": 47260797,
+      "ordinal": 28,
+      "supervision_seed": 2932412
+    },
+    {
+      "identifier": "seed_029",
+      "market_seed": 48260800,
+      "ordinal": 29,
+      "supervision_seed": 3037141
+    },
+    {
+      "identifier": "seed_030",
+      "market_seed": 49260803,
+      "ordinal": 30,
+      "supervision_seed": 3141870
+    }
+  ],
+  "total_elapsed_seconds": 2213.348240500007,
+  "total_output_bytes": 1086439922,
+  "unavailable_or_approximated": [
+    "Order amendment is unavailable in the current model.",
+    "Intraday wall-clock timestamps are unavailable.",
+    "Order-book event output covers the primary listing only."
+  ],
+  "updated_utc": "2026-07-16T21:33:14Z",
+  "valid": [
+    "seed_001",
+    "seed_002",
+    "seed_003",
+    "seed_004",
+    "seed_005",
+    "seed_006",
+    "seed_007",
+    "seed_008",
+    "seed_009",
+    "seed_010",
+    "seed_011",
+    "seed_012",
+    "seed_013",
+    "seed_014",
+    "seed_015",
+    "seed_016",
+    "seed_017",
+    "seed_018",
+    "seed_019",
+    "seed_020",
+    "seed_021",
+    "seed_022",
+    "seed_023",
+    "seed_024",
+    "seed_025",
+    "seed_026",
+    "seed_027",
+    "seed_028",
+    "seed_029",
+    "seed_030"
+  ]
+}

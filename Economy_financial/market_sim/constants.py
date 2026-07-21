@@ -431,8 +431,8 @@ EVAL_MATERIALITY_THRESHOLD: Final[float] = 0.02  # True-overstatement line.
 # economy (balances ~ float x price) is two orders of magnitude smaller,
 # so monetary sanction bases are computed on a SIMULATION-SCALE turnover
 # proxy: sim_turnover = SIM_TURNOVER_BALANCE_MULTIPLE * corporate balance.
-# The statutory ceiling RATES (1% experimental ordinary, 4% cross-border
-# consumer, 3% CSDDD) then apply to that proxy, keeping the legal logic
+# The track cap rates (1% experimental ordinary, 4% cross-border consumer
+# LEGAL-ANCHOR, 3% CSDDD legal ceiling) then apply to that proxy, keeping the logic
 # intact while making sanctions proportionate instead of confiscatory.
 # The multiple itself is a stylized turnover/net-assets ratio, not an
 # empirical estimate.

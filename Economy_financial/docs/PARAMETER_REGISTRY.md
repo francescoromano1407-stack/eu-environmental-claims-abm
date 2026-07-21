@@ -17,7 +17,7 @@ GSA = enters the global sensitivity campaign
 | SAN-02 | `benefit_multiplier` | `SupervisionParameters.benefit_multiplier` | x benefit | 1.5 | 0.5 | 3 | EXPERIMENT | illustrative_scenario | yes | Higher -> stronger deterrence of profitable overstatement. |
 | SAN-03 | `affected_revenue_rate` | `SupervisionParameters.affected_revenue_rate` | share/severity | 0.02 | 0.005 | 0.06 | EXPERIMENT | illustrative_scenario | yes | Higher -> larger penalties for high-exposure channels. |
 | SAN-04 | `ordinary_penalty_cap_rate` | `SupervisionParameters.ordinary_penalty_cap_rate` | share of sim turnover | 0.01 |  |  | EXPERIMENT | illustrative_scenario | no | Higher -> binding less often. |
-| SAN-05 | `consumer_cross_border_cap_rate` | `SupervisionParameters.consumer_cross_border_cap_rate` | share of turnover | 0.04 |  |  | LEGAL | legally_mandated | no | n/a (legal ceiling). |
+| SAN-05 | `consumer_cross_border_cap_rate` | `SupervisionParameters.consumer_cross_border_cap_rate` | share of turnover | 0.04 |  |  | LEGAL-ANCHOR | reference_class | no | n/a (fixed legal anchor). |
 | SAN-06 | `csddd_cap_rate` | `SupervisionParameters.csddd_cap_rate` | share of turnover | 0.03 |  |  | LEGAL | legally_mandated | no | n/a (legal ceiling). |
 | SAN-07 | `penalty_repeat_escalation_rate` | `constants.PENALTY_REPEAT_ESCALATION_RATE` | x per repeat | 0.5 |  |  | EXPERIMENT | illustrative_scenario | no | Higher -> harsher recidivism response. |
 | CAP-01 | `evidence_request_capacity` | `SupervisionParameters.evidence_request_capacity` | cases/period | 20 | 5 | 40 | EXPERIMENT | reference_class | yes | Higher -> more coverage, more false positives possible. |
@@ -81,13 +81,13 @@ GSA = enters the global sensitivity campaign
 
 ### SAN-04 `ordinary_penalty_cap_rate`
 
-- **Justification**: Ordinary simulated ceiling; the legal 4%/3% ceilings are track-gated separately. Held fixed in the campaign to keep the track-gating interpretable.
+- **Justification**: Ordinary simulated ceiling; the 4% consumer legal anchor and 3% CSDDD ceiling are track-gated separately. Held fixed in the campaign to keep the track-gating interpretable.
 - **Source**: No direct empirical calibration; scenario range used for sensitivity analysis.
 
 ### SAN-05 `consumer_cross_border_cap_rate`
 
-- **Justification**: Ceiling available only for coordinated widespread cross-border consumer infringements.
-- **Source**: Directive (EU) 2019/2161, Art. 3(6) amending UCPD Art. 13 (4% turnover fine availability for widespread infringements), ELI: dir/2019/2161/oj
+- **Justification**: Exact in-model cap anchored to the statutory minimum maximum, available only for coordinated widespread cross-border consumer infringements; EU law does not fix 4% as a uniform ceiling.
+- **Source**: Directive (EU) 2019/2161, Art. 3(6) amending UCPD Art. 13 (national maximum must be at least 4% of relevant turnover for widespread infringements), ELI: dir/2019/2161/oj
 
 ### SAN-06 `csddd_cap_rate`
 

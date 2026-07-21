@@ -34,7 +34,7 @@ import statistics
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from market_sim.parameter_registry import (
     build_simulation_kwargs,
@@ -201,29 +201,111 @@ def _record_failure(outdir: str, draw: int, error: Exception) -> None:
     _atomic_write_json(path, records)
 
 
-def _load_valid_draw(path: str) -> Optional[dict[str, Any]]:
+def validate_draw_payload(payload: Any, config: CampaignConfig, draw: int,
+                          sample: Mapping[str, float]) -> tuple[bool, str]:
+    """Validate one atomic draw against the exact paired campaign design.
+
+    ``complete: true`` is deliberately insufficient.  A resumable campaign
+    must not silently accept a file produced with a different LHS point,
+    horizon, replication schedule, regime set, or random-number stream.
+    The reason string is intended for inspection manifests and dry-run logs.
+    """
+    if not isinstance(payload, dict):
+        return False, "payload is not a JSON object"
+    if payload.get("complete") is not True:
+        return False, "draw is not marked complete"
+    expected_sample = dict(sample)
+    identity = (
+        ("draw", draw),
+        ("sample", expected_sample),
+        ("horizon_days", config.horizon_days),
+        ("replications", config.replications),
+        ("regimes", list(config.regimes)),
+    )
+    for key, expected in identity:
+        if payload.get(key) != expected:
+            return False, f"{key} mismatch"
+    expected_discount = float(expected_sample["social_discount_rate"])
+    try:
+        observed_discount = float(payload.get("discount_rate"))
+    except (TypeError, ValueError):
+        return False, "discount_rate is missing or non-numeric"
+    if not math.isclose(observed_discount, expected_discount,
+                        rel_tol=0.0, abs_tol=1e-15):
+        return False, "discount_rate does not match the LHS point"
+    rows = payload.get("rows")
+    expected_count = config.replications * len(config.regimes)
+    if not isinstance(rows, list) or len(rows) != expected_count:
+        return False, f"expected {expected_count} regime-replication rows"
+    expected_rows = {
+        (replication, regime): (
+            config.market_seed(draw, replication),
+            config.supervision_seed(draw, replication),
+        )
+        for replication in range(config.replications)
+        for regime in config.regimes
+    }
+    observed: set[tuple[int, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False, "a run row is not a JSON object"
+        key = (row.get("replication"), row.get("regime"))
+        if key not in expected_rows:
+            return False, "unexpected regime-replication row"
+        if key in observed:
+            return False, "duplicate regime-replication row"
+        if (row.get("market_seed"), row.get("supervision_seed")) \
+                != expected_rows[key]:
+            return False, "market or supervision seed mismatch"
+        metrics = row.get("metrics")
+        if not isinstance(metrics, dict) or not metrics:
+            return False, "metrics are missing or empty"
+        try:
+            if not all(math.isfinite(float(value))
+                       for value in metrics.values()):
+                return False, "metrics contain NaN or infinity"
+        except (TypeError, ValueError):
+            return False, "metrics contain a non-numeric value"
+        observed.add(key)
+    if observed != set(expected_rows):
+        return False, "regime-replication schedule is incomplete"
+    return True, "valid"
+
+
+def _load_valid_draw(path: str, config: Optional[CampaignConfig] = None,
+                     draw: Optional[int] = None,
+                     sample: Optional[Mapping[str, float]] = None
+                     ) -> Optional[dict[str, Any]]:
     if not os.path.exists(path):
         return None
     try:
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
-        if payload.get("complete") is True:
+        if config is not None:
+            if draw is None or sample is None:
+                raise ValueError("strict draw validation needs draw and sample")
+            valid, _ = validate_draw_payload(payload, config, draw, sample)
+            return payload if valid else None
+        if isinstance(payload, dict) and payload.get("complete") is True:
             return payload
     except (json.JSONDecodeError, OSError):
         return None
     return None
 
 
-def run_one_draw(config: CampaignConfig, draw: int,
-                 sample: Mapping[str, float]) -> dict[str, Any]:
-    """Run all paired replications of one parameter draw."""
+def run_replication_rows(config: CampaignConfig, draw: int,
+                         sample: Mapping[str, float],
+                         replications: Iterable[int]) -> list[dict[str, Any]]:
+    """Run selected paired replications without repeating existing ones."""
     from market_sim.simulation import Simulation   # Local: avoid cycles.
 
     discount = float(sample["social_discount_rate"])
     evaluator = PolicyOutcomeEvaluator(discount_rate_annual=discount)
     kwargs = build_simulation_kwargs(sample)
     rows: list[dict[str, Any]] = []
-    for replication in range(config.replications):
+    for replication in replications:
+        if replication < 0:
+            raise ValueError("replication indices must be non-negative")
         market_seed = config.market_seed(draw, replication)
         supervision_seed = config.supervision_seed(draw, replication)
         for regime in config.regimes:
@@ -248,6 +330,15 @@ def run_one_draw(config: CampaignConfig, draw: int,
                 "supervision_seed": supervision_seed,
                 "metrics": metrics,
             })
+    return rows
+
+
+def run_one_draw(config: CampaignConfig, draw: int,
+                 sample: Mapping[str, float]) -> dict[str, Any]:
+    """Run all paired replications of one parameter draw."""
+    rows = run_replication_rows(
+        config, draw, sample, range(config.replications))
+    discount = float(sample["social_discount_rate"])
     return {
         "complete": True,
         "draw": draw,
@@ -335,7 +426,7 @@ def run_campaign(config: CampaignConfig,
     skipped = 0
     for draw in indices:
         path = _draw_path(config.outdir, draw)
-        if _load_valid_draw(path) is not None:
+        if _load_valid_draw(path, config, draw, design[draw]) is not None:
             skipped += 1
             continue
         try:
@@ -353,7 +444,7 @@ def run_campaign(config: CampaignConfig,
             print(f"[{config.label}] draw {draw}: {completed} run, "
                   f"{skipped} resumed, ~{remaining/60:.1f} min left",
                   flush=True)
-    summary = summarize_campaign(config.outdir)
+    summary = summarize_campaign(config.outdir, config=config)
     if progress:
         print(f"[{config.label}] finished: {completed} new draws, "
               f"{skipped} resumed, "
@@ -484,15 +575,24 @@ def _importance_diagnostics(design_rows: list[dict[str, float]],
             "condition_number": condition, "warnings": warnings}
 
 
-def summarize_campaign(outdir: str,
-                       write: bool = True) -> dict[str, Any]:
+def summarize_campaign(outdir: str, write: bool = True,
+                       config: Optional[CampaignConfig] = None
+                       ) -> dict[str, Any]:
     """Aggregate all valid draw files in `outdir` into the campaign
     summary (paired contrasts, rank/winner/Pareto frequencies,
     weight-sensitivity fraction, parameter importance)."""
     draws: list[dict[str, Any]] = []
+    design = (latin_hypercube_design(config.master_seed, config.draws)
+              if config is not None else None)
     for name in sorted(os.listdir(outdir)):
         if name.startswith("draw_") and name.endswith(".json"):
-            payload = _load_valid_draw(os.path.join(outdir, name))
+            draw_number = int(name[5:-5])
+            payload = _load_valid_draw(
+                os.path.join(outdir, name), config, draw_number,
+                design[draw_number] if design is not None
+                and 0 <= draw_number < len(design) else None,
+            ) if config is not None and 0 <= draw_number < len(design) \
+                else _load_valid_draw(os.path.join(outdir, name))
             if payload is not None:
                 draws.append(payload)
     if not draws:

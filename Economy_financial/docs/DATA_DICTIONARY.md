@@ -14,12 +14,34 @@ compute.
 
 | Path | Content |
 |---|---|
-| `campaign_120d/` | 120-day global screening campaign (200 LHS draws × 3 paired replications × 3 regimes) |
-| `campaign_365d/` | 365-day confirmation campaign on the 60-draw policy-relevant subset (`subset_selection_365d.json`) |
-| `campaign_1000d/`, `campaign_2000d/` | long-horizon robustness campaigns on representative draws (`subset_selection_long.json`) |
-| `default_comparison.json` | 5-replication paired comparison at registry-default parameters, 365 days |
-| `figures/` | publication figures (`fig01`–`fig10`) and CSV tables |
-| `subset_selection_*.json` | subset-selection rules and chosen draw indices |
+| `configuration.json`, `manifest.json` | unified four-horizon publication design and execution state |
+| `raw/horizon_120d/` | complete 120-day campaign (200 LHS draws × 3 paired replications × 3 regimes) |
+| `raw/robustness_365d/` | complete 365-day campaign on the same 200 LHS points |
+| `raw/robustness_1000d/`, `raw/robustness_2000d/` | complete long-horizon campaigns on the same 200 LHS points |
+| `summaries/` | horizon summaries, draw effects, run-level tables, unified ranking stability, and LHS range table |
+| `figures/` | publication figures generated from stored raw outputs |
+| `financial_validation/pilot_30seeds/` | completed fixed-parameter market-validation campaign: 30 independent seeds, per-seed manifests, daily market series, order-book event streams, and `diagnostics/` with the multi-seed classifications (positive price impact **not reproduced**; see manuscript Section 5.7) |
+| `replication_robustness/` | executed 15-replication extension on 12 representative draws at all four horizons (`manifest.json`, `replication_robustness_summary.json`, `ranking_stability.csv`) |
+| `audits/` | static price-feedback audits: `firm_price_feedback_audit.{json,md}` (no own-share-price feedback in firm environmental decisions; treasury financing rule only) and `paper_price_feedback_materiality_audit.{json,md}` |
+
+## Financial validation seed outputs
+
+Each `financial_validation/<campaign>/seed_NNN/manifest.json` records complete
+fixed parameters, market/supervision seeds, burn-in, code provenance, runtime,
+schema versions, record counts, byte sizes, hashes, limitations, and completion
+status. `aggregate_manifest.json` records reuse/rejection/execution status,
+runtime/storage totals, anomalies, and the five-to-thirty-seed planning
+projection.
+
+`daily_market.csv` contains `day`, `symbol`, `asset_price`, `log_return`,
+`volume`, and `realized_volatility`, for post-burn-in days only.
+
+When enabled, `order_book_events.csv` contains deterministic event sequence,
+day, symbol, trader/order identifiers, event type, side/order type, prices and
+quantities, executions, best quotes, spread, total active depth, mid-prices,
+volume, and trade sign. Empty fields mean not applicable. The stream is a
+passive primary-listing export and never exposes latent environmental truth to
+agents or decision logic.
 
 ## Campaign directory files
 
@@ -37,7 +59,7 @@ compute.
 ### `draw_XXXX.json`
 | Field | Meaning |
 |---|---|
-| `complete` | `true` only when every replication × regime finished and passed numerical-integrity checks; resume logic recomputes anything else |
+| `complete` | `true` only when every replication × regime finished and passed numerical-integrity checks; strict resume also verifies the LHS point, horizon, regimes, replications, seeds, discount rate, and finite metrics |
 | `sample` | the parameter draw (raw LHS values; integers rounded at application time) |
 | `discount_rate` | per-draw sampled social discount rate used by the evaluator |
 | `rows[]` | one entry per regime × replication: `regime`, `replication`, `market_seed`, `supervision_seed`, `metrics{}` |

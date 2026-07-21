@@ -1,0 +1,9 @@
+diagnostic,status,valid_seeds,seed_status_counts
+cancellation_activity,reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 0, ""pending"": 0, ""reproduced"": 30}"
+fat_tailed_returns,partially reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 27, ""pending"": 0, ""reproduced"": 3}"
+positive_price_impact,not reproduced,30,"{""not reproduced"": 26, ""partially reproduced"": 4, ""pending"": 0, ""reproduced"": 0}"
+positive_spread_and_depth,reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 0, ""pending"": 0, ""reproduced"": 30}"
+positive_volume_volatility_relation,partially reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 13, ""pending"": 0, ""reproduced"": 17}"
+trade_sign_persistence,reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 0, ""pending"": 0, ""reproduced"": 30}"
+volatility_clustering,reproduced,30,"{""not reproduced"": 0, ""partially reproduced"": 0, ""pending"": 0, ""reproduced"": 30}"
+weak_linear_return_autocorrelation,partially reproduced,30,"{""not reproduced"": 1, ""partially reproduced"": 29, ""pending"": 0, ""reproduced"": 0}"

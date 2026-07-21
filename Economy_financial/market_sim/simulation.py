@@ -2090,6 +2090,7 @@ class Simulation:
         print(f"Starting Financial Market Simulation for {self.days} days...")
 
         for day in range(1, self.days + 1):
+            self.order_book.set_observation_day(day)
             last_price = self.asset.get_last_price()
 
             # Weekends: interest accrues, no trading.
@@ -2267,6 +2268,8 @@ class Simulation:
               f"{self.days} days...")
 
         for day in range(1, self.days + 1):
+            for venue in venues:
+                venue.order_book.set_observation_day(day)
             last_price = {v.symbol: v.asset.get_last_price() for v in venues}
             if self.greenwashing_supervisor is not None:
                 # Part J: commissioned re-measurements arrive before the
