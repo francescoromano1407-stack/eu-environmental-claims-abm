@@ -49,8 +49,9 @@ _SRC_UCPD = "Directive 2005/29/EC (UCPD), ELI: dir/2005/29/oj"
 _SRC_2024_825 = ("Directive (EU) 2024/825 (Empowering Consumers), "
                  "ELI: dir/2024/825/oj")
 _SRC_2019_2161 = ("Directive (EU) 2019/2161, Art. 3(6) amending UCPD "
-                  "Art. 13 (4% turnover fine availability for widespread "
-                  "infringements), ELI: dir/2019/2161/oj")
+                  "Art. 13 (national maximum must be at least 4% of relevant "
+                  "turnover for widespread infringements), "
+                  "ELI: dir/2019/2161/oj")
 _SRC_2026_470 = ("Directive (EU) 2026/470 as documented in "
                  "docs/EU_GREENWASHING_MODEL.md (stylized in-model legal "
                  "scenario; treat all derived values as scenario law)")
@@ -122,16 +123,18 @@ REGISTRY: tuple[ParameterSpec, ...] = (
           "SupervisionParameters.ordinary_penalty_cap_rate",
           "share of sim turnover", 0.01, None, None, "EXPERIMENT",
           "illustrative_scenario", NO_CALIBRATION,
-          "Ordinary simulated ceiling; the legal 4%/3% ceilings are "
-          "track-gated separately. Held fixed in the campaign to keep "
+          "Ordinary simulated ceiling; the 4% consumer legal anchor and 3% "
+          "CSDDD ceiling are track-gated separately. Held fixed in the campaign to keep "
           "the track-gating interpretable.",
           "Higher -> binding less often.", False),
     _spec("SAN-05", "consumer_cross_border_cap_rate",
           "SupervisionParameters.consumer_cross_border_cap_rate",
-          "share of turnover", 0.04, None, None, "LEGAL",
-          "legally_mandated", _SRC_2019_2161,
-          "Ceiling available only for coordinated widespread cross-border "
-          "consumer infringements.", "n/a (legal ceiling).", False),
+          "share of turnover", 0.04, None, None, "LEGAL-ANCHOR",
+          "reference_class", _SRC_2019_2161,
+          "Exact in-model cap anchored to the statutory minimum maximum, "
+          "available only for coordinated widespread cross-border consumer "
+          "infringements; EU law does not fix 4% as a uniform ceiling.",
+          "n/a (fixed legal anchor).", False),
     _spec("SAN-06", "csddd_cap_rate",
           "SupervisionParameters.csddd_cap_rate", "share of turnover",
           0.03, None, None, "LEGAL", "legally_mandated",

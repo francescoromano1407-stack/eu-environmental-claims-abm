@@ -6,10 +6,13 @@ existing sensitivity-campaign tests.
 
 import json
 
+import pytest
+
 from market_sim.sensitivity_campaign import (CampaignConfig, DEFAULT_REGIMES,
                                               latin_hypercube_design)
 from run_global_lhs_campaign import (HorizonPlan, build_parser,
                                      hydrate_completed_draws, initialise,
+                                     inspect_completed_draws, main,
                                      planned_horizons)
 
 
@@ -18,7 +21,8 @@ def test_default_design_meets_publication_minimums():
     assert args.draws >= 200
     assert args.replications >= 3
     assert args.horizon >= 120
-    assert len(planned_horizons(args)) == 1
+    assert [plan.days for plan in planned_horizons(args)] == [120, 365, 1000, 2000]
+    assert args.execute_missing is False
 
 
 def test_confirmation_is_a_complete_365_day_design():
@@ -59,6 +63,7 @@ def _payload(config, draw, sample):
     return {
         "complete": True, "draw": draw, "sample": sample,
         "horizon_days": config.horizon_days,
+        "discount_rate": sample["social_discount_rate"],
         "replications": config.replications,
         "regimes": list(config.regimes), "rows": rows,
     }
@@ -111,3 +116,53 @@ def test_mismatched_or_corrupt_draws_are_not_reused(tmp_path):
                                     HorizonPlan(1000, "robustness_1000d", None), config)
     assert reused["imported_draws"] == 0
     assert not (destination / "draw_0000.json").exists()
+
+
+def test_read_only_inspection_reports_exact_missing_and_invalid_draws(tmp_path):
+    destination = tmp_path / "run" / "raw" / "horizon_120d"
+    destination.mkdir(parents=True)
+    config = CampaignConfig(
+        outdir=str(destination), draws=3, replications=1,
+        horizon_days=120, master_seed=42, supervision_base_seed=7,
+        regimes=DEFAULT_REGIMES,
+    )
+    design = latin_hypercube_design(config.master_seed, config.draws)
+    (destination / "manifest.json").write_text(
+        json.dumps({"config": config.to_dict()}), encoding="utf-8")
+    (destination / "draw_0000.json").write_text(
+        json.dumps(_payload(config, 0, design[0])), encoding="utf-8")
+    (destination / "draw_0001.json").write_text("{broken", encoding="utf-8")
+    args = build_parser().parse_args([
+        "--development", "--draws", "3", "--replications", "1",
+        "--base-horizon-only", "--existing-root", str(tmp_path / "none"),
+    ])
+    audit = inspect_completed_draws(
+        args, tmp_path / "run", destination,
+        HorizonPlan(120, "horizon_120d", None), config)
+    assert audit["valid_existing_draw_ids"] == [0]
+    assert [item["draw"] for item in audit["missing_or_invalid_draws"]] == [1, 2]
+    assert "corrupt JSON" in audit["missing_or_invalid_draws"][0]["reason"]
+    assert audit["missing_or_invalid_draws"][1]["reason"] == "file is missing"
+
+
+def test_cli_defaults_to_non_mutating_dry_run(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("dry-run must not execute the campaign")
+
+    monkeypatch.setattr("run_global_lhs_campaign.run_campaign", forbidden)
+    output_root = tmp_path / "campaigns"
+    main([
+        "--development", "--draws", "2", "--replications", "1",
+        "--base-horizon-only", "--existing-root", str(tmp_path / "none"),
+        "--output-root", str(output_root),
+    ])
+    assert not output_root.exists()
+
+
+def test_rebuild_only_refuses_when_simulations_are_missing(tmp_path):
+    with pytest.raises(ValueError, match="requires simulation"):
+        main([
+            "--development", "--draws", "2", "--replications", "1",
+            "--base-horizon-only", "--existing-root", str(tmp_path / "none"),
+            "--output-root", str(tmp_path / "campaigns"), "--rebuild-only",
+        ])

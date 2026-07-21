@@ -1,0 +1,29 @@
+classification=plausible_candidate_not_verified_identity
+candidate_commit=00134a694e653fc2ce74b62eab1e8c6e9d0f67f7
+candidate_parent=1645f3589408503894c7e8f44a92ffe382a9a5b4
+candidate_tree=a0686dd80558873bce286d89125ac50dbe3ae8b6
+candidate_author_date=2026-07-16T17:35:02+02:00
+candidate_commit_date=2026-07-16T17:35:02+02:00
+candidate_subject=fine del modello
+source_scope=run_global_lhs_campaign.py and all 21 Python files under market_sim/ stored by the candidate commit
+source_checksum_entries=22
+source_checksum_list_sha256=88987cccdd479cfe6ae8db78ef3c693af523828589796ff3464ba25676fa6856
+
+EVIDENTIARY BASIS
+
+1. The candidate is the direct child of the documented base commit.
+2. The authoritative campaign completed at 2026-07-16T14:56:55Z (16:56:55 +02:00); the candidate was committed at 17:35:02 +02:00, approximately 38 minutes later.
+3. The candidate commit stores the global campaign driver, the market_sim source tree, and the authoritative global campaign outputs that remain unchanged in the current checkout.
+4. The candidate commit also stores CPython 3.12 cache files timestamped before the campaign. Using CPython 3.12.13 for a read-only comparison, compiling each of the 22 candidate source blobs produced matching marshalled code objects for all 22 corresponding cache files. This corroborates semantic correspondence between the candidate source and those cached artifacts.
+
+LIMITATIONS
+
+- The campaign manifests do not contain a source-tree hash or per-source-file hashes.
+- No stash, reflog entry, reachable or unreachable commit, named local-history entry, or dated archive preserves the original dirty worktree.
+- Matching Python code objects does not prove textual byte identity: comments, source encodings, and line-ending representations are not fully established. It also does not cryptographically link the cached artifacts or candidate source to each authoritative output.
+- The direct-child timing and co-location of source and outputs are circumstantial evidence, not proof that every candidate blob exactly matches the source used during execution.
+- The current worktree includes later changes to the driver and model and must not be substituted for this candidate.
+
+CONCLUSION
+
+Use commit 00134a694e653fc2ce74b62eab1e8c6e9d0f67f7 as the best available candidate source snapshot, explicitly labelled as partially reconstructed. Do not describe it as the recovered original dirty state.

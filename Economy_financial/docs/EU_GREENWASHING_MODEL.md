@@ -40,9 +40,10 @@ See the [Commission answer E-000800/2025](https://www.europarl.europa.eu/doceo/d
 - The CSDDD 3% ceiling is callable only for a due-diligence case. An ordinary
   consumer, CSRD or investor-communication case uses its own configurable
   policy.
-- The 4% consumer maximum is used only when a case is explicitly marked as a
-  coordinated widespread cross-border consumer infringement. It is a ceiling,
-  not the default fine.
+- The model's 4% consumer cap is used only when a case is explicitly marked as
+  a coordinated widespread cross-border consumer infringement. It is a
+  `LEGAL-ANCHOR`: Directive (EU) 2019/2161 requires the national maximum to be
+  at least 4%, but does not establish 4% as a uniform EU ceiling.
 - Small and voluntary reporters remain subject to consumer-claim and relevant
   market-communication surveillance.
 - Named environmental metrics and claim/evidence scope replace the scalar
@@ -148,8 +149,9 @@ calculated = 1.5 * estimated_benefit
 applied = min(calculated, applicable_track_cap, corporate_headroom)
 ```
 
-The ordinary simulated ceiling is 1% of turnover (`EXPERIMENT`). The 4% and
-3% rates are selected only by their consumer-cross-border and CSDDD conditions.
+The ordinary simulated ceiling is 1% of turnover (`EXPERIMENT`). The model's
+4% consumer legal anchor and the 3% CSDDD ceiling are selected only by their
+consumer-cross-border and CSDDD conditions.
 
 ## 6. Corporate choice and greenhushing
 
@@ -201,6 +203,18 @@ V_fair = V_fundamental
 Sophisticated agents inspect linked evidence and apply the full controversy
 discount; unsophisticated agents update more slowly. Chartists retain the
 indirect price-only channel.
+
+Direction of the financial layer: claims, evidence and published supervisory
+outcomes move investor valuation and hence prices, and prices affect
+corporate financing proceeds through the treasury-sale rule
+(`CorporatePolicy.sell_treasury`, which prices against the order-book
+midpoint). The static audit in `results/audits/firm_price_feedback_audit.md`
+finds no other direct or indirect own-share-price input to firm decisions:
+greenwashing/disclosure, qualification and transition-investment rules never
+read the firm's own price, order book or market valuation. The equity market
+is therefore a market-response and financing context, not a price-discipline
+mechanism, and no paper conclusion relies on stock prices disciplining
+corporate environmental behaviour.
 
 ## 8. Event order and random streams
 
@@ -481,9 +495,10 @@ calculated ×= min(cap, 1 + 0.5 × prior_severe_findings)   (EXPERIMENT)
 applied = min(calculated, track_ceiling_rate × sim_turnover, headroom)
 ```
 
-The track ceiling **rates** are unchanged and remain track-gated: 1%
-(EXPERIMENT ordinary), 4% only for coordinated cross-border consumer
-cases, 3% only for CSDDD due-diligence cases. Pre-fix, 10/14 sanctions
+The track cap **rates** are unchanged and remain track-gated: 1%
+(EXPERIMENT ordinary), a 4% LEGAL-ANCHOR only for coordinated cross-border
+consumer cases, and the 3% legal ceiling only for CSDDD due-diligence cases.
+Pre-fix, 10/14 sanctions
 seized the firm's entire distributable balance; post-fix zero cases are
 headroom-bound in the reference year while sanctions stay strictly
 positive and monotone in severity, confidence, benefit, affected revenue
@@ -719,13 +734,12 @@ handling, git hash, regime identifiers). Composite weights are not
 sampled continuously; rank frequency is reported across the five
 discrete EXPERIMENT weight scenarios per draw.
 
-Executed scale (shipped in `results/`, exact commands in
+Executed scale (shipped in `results/`, exact inspection commands in
 `docs/REPRODUCIBILITY.md`): 200 draws x 3 replications x 3 regimes at
-120 days (1,800 runs); a 60-draw confirmation at 365 days selected by a
-documented rule (all connector-winner draws, both hub-effect extremes,
-a median-representative core, seeded random fill); and representative
-long-horizon robustness draws at 1,000 days (6 draws) and 2,000 days
-(3 draws). Summaries report paired-effect distributions, probabilities
+each of 120, 365, 1,000, and 2,000 days (1,800 regime runs per horizon;
+7,200 in total). All four horizons use the same complete LHS design;
+`subset` is null in the authoritative machine-readable configuration.
+Summaries report paired-effect distributions, probabilities
 of improvement, confidence intervals, rank/winner/Pareto frequencies,
 the weight-sensitivity fraction, and parameter importance as
 standardized regression coefficients plus partial rank correlations.
@@ -734,27 +748,29 @@ causal identification or empirical prediction.
 
 ### 15.3 Headline robustness findings (results, not forecasts)
 
-* **No universal winner.** The default-weight winner changes across
-  weight scenarios in 70% of the 120-day draws (58% at 365 days), and
-  across horizons on the shared long-horizon draws. Policy rankings are
+* **Conditional rankings.** The default-weight winner changes across
+  horizons for 80.5% of the 200 shared draws. Changing normative weights
+  changes the winner in 70.0%, 63.0%, 58.0%, and 45.5% of draws at 120,
+  365, 1,000, and 2,000 days. Policy rankings are
   reported only conditional on horizon, discount rate, weights and
   participation.
 * **Hub (Regime B):** reduces originally-material overstatements in
-  ~91% and exposure-weighted severity in 85–87% of draws (120d/365d),
+  87.5–91.0% and exposure-weighted severity in 85.0–90.5% of draws,
   with effect size driven chiefly by `hub_participation_scale` and
   `hub_strictness`; but it increases the greenhushing gap in ~95–100%
   of draws and always adds public cost. Its severity effect at high
   strictness/noise partly operates through withdrawals — a trade-off,
   not a free lunch.
 * **Connector (Regime C):** near-null severity effect at 120 days
-  (P(improve)=40%), modest at 365 days (63%), but on the six
-  long-horizon representative draws it becomes the dominant
-  severity-reducer (P=100% at 1,000/2,000 days) as fixed costs amortize
+  (P(improve)=40.5%), heterogeneous at 365 days (60.5%), and a much more
+  robust severity reducer at 1,000 and 2,000 days (97.0% and 100% of all
+  200 draws) as fixed costs amortize
   and reconciliation/correction lifecycles compound. This
   horizon-dependence weakens any short-horizon claim in either
   direction and is exactly why conclusions must be stated
-  horizon-conditionally; the long-horizon result rests on 6/3 draws and
-  is not claimed robust across the full space.
+  horizon-conditionally. The full-space long-horizon campaign resolves
+  the former 6/3-draw coverage limitation but does not provide empirical
+  calibration.
 * **Conflict desk:** conflict investigations occur mainly under
   Regime C (register errors create genuine disputes); resolution delay
   is capacity- and reserve-dependent; heavy source error loads the
@@ -772,9 +788,9 @@ causal identification or empirical prediction.
 3. Hub effects are described as prevention of good-faith errors plus
    withdrawal-induced claim suppression; any stronger anti-fraud claim
    requires separate demonstration (the hub cannot block publication).
-4. Connector effects may be cited only horizon-conditionally and only
-   with the coverage/source-error robustness panels (Figure 10); the
-   long-horizon advantage currently rests on a small draw subset.
+4. Connector effects may be cited only horizon-conditionally and with
+   coverage/source-error diagnostics. Full-space long-horizon robustness
+   does not make the result an empirical forecast.
 5. Rankings are reported conditional on scenario, horizon, discount
    rate and weights, with the weight-sensitivity fraction alongside.
 6. The limitations in §15.5 belong in the MAIN summary of any paper,
@@ -787,7 +803,7 @@ causal identification or empirical prediction.
 | Sensitivity analysis was a smoke interface (1 replication/sample) | RESOLVED — full LHS campaign, >=3 paired replications, resume, manifest |
 | Conflicts closed same-day without consuming capacity | RESOLVED — CONFLICT_RESOLUTION procedure, shared capacity, reserve, corroboration-gated escalation |
 | Parameter values without stated evidence basis | RESOLVED (transparency), NOT RESOLVED (calibration) — registry separates legally-mandated / reference-class / illustrative values; no behavioural parameter is empirically estimated |
-| Long-horizon confirmation of the full design space | PARTIAL — 1,000/2,000-day results cover 6/3 representative draws; full-space long-horizon campaign left as documented external run |
+| Long-horizon confirmation of the full design space | RESOLVED for the stated LHS design — 200 draws at both 1,000 and 2,000 days; empirical calibration remains unresolved |
 | Empirical calibration of demand/trust/turnover channels | NOT RESOLVED — out of scope for simulation work; flagged for survey/quasi-experimental follow-up |
 | National transposition, appeals, procurement, GDPR/NIS2 engineering | NOT RESOLVED — reduced-form as before (§12.6) |
 | Composite score remains an EXPERIMENT aggregation | UNCHANGED BY DESIGN — reported only next to raw metrics, Pareto sets and rank-stability warnings |

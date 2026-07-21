@@ -1,0 +1,45 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Notebook and local-tool state
+.ipynb_checkpoints/
+.agents/
+.codex/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary, backup, lock, and local QA artifacts
+*.tmp
+*.temp
+*.bak
+*.orig
+*.log
+~$*.docx
+_qa_*/
+rendered/
+
+# Intentionally not ignored: source, DOCX manuscripts, results/, and provenance/

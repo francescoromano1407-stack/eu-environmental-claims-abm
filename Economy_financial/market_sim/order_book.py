@@ -16,7 +16,7 @@ annotations are lazy via `from __future__ import annotations`).
 from __future__ import annotations
 
 import bisect
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from market_sim.constants import (
     BASE_COMMISSION_RATE,
@@ -86,6 +86,81 @@ class OrderBook:
         # settlement notifies it in O(1) so leveraged positions can be
         # margin-checked on each mark move. None => zero overhead.
         self.clearing_house = None
+        # Optional research-only event observer.  It is unset in every
+        # production/LHS run and receives only order-book state that is
+        # already available to the matching engine.  It cannot feed values
+        # back into agents or change matching/settlement decisions.
+        self.event_sink: Optional[Callable[[dict[str, Any]], None]] = None
+        self.observation_day: Optional[int] = None
+
+    def set_event_sink(
+            self, sink: Optional[Callable[[dict[str, Any]], None]]) -> None:
+        """Attach/detach a passive order-event observer."""
+        self.event_sink = sink
+
+    def set_observation_day(self, day: Optional[int]) -> None:
+        """Set passive calendar context for legacy APIs lacking a day arg."""
+        self.observation_day = None if day is None else int(day)
+
+    def _emit_event(self, event_type: str, current_day: Optional[int],
+                    **values: Any) -> None:
+        sink = self.event_sink
+        if sink is None:
+            return
+        # Never call best_bid/best_ask here: those methods intentionally
+        # skim lazy tombstones and would let an observer mutate matching
+        # state.  This reverse scan is slower but strictly passive and is
+        # paid only when validation logging is explicitly enabled.
+        bid = next((order for _, order in reversed(self._bids)
+                    if order.active and order.quantity > 0), None)
+        ask = next((order for _, order in reversed(self._asks)
+                    if order.active and order.quantity > 0), None)
+        best_bid = bid.price if bid is not None else None
+        best_ask = ask.price if ask is not None else None
+        bid_depth = sum(order.quantity for _, order in self._bids
+                        if order.active and order.quantity > 0)
+        ask_depth = sum(order.quantity for _, order in self._asks
+                        if order.active and order.quantity > 0)
+        sink({
+            "day": int(current_day) if current_day is not None else None,
+            "event_type": event_type,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": (best_ask - best_bid)
+            if best_bid is not None and best_ask is not None else None,
+            "bid_depth": bid_depth,
+            "ask_depth": ask_depth,
+            "mid_price": ((best_bid + best_ask) / 2.0)
+            if best_bid is not None and best_ask is not None
+            else (best_bid if best_bid is not None else best_ask),
+            **values,
+        })
+
+    def _emit_fill(self, order_id: Optional[int], trader_id: str,
+                   side: str, order_type: str, limit_price: Optional[float],
+                   remaining: int, original: int, executed: int,
+                   execution_price: float, current_day: int,
+                   counterparty_order_id: Optional[int],
+                   trade_sign: int,
+                   mid_price_before: Optional[float]) -> None:
+        common = {
+            "order_id": order_id,
+            "counterparty_order_id": counterparty_order_id,
+            "trader_id": trader_id,
+            "side": side,
+            "order_type": order_type,
+            "limit_price": limit_price,
+            "quantity": original,
+            "executed_quantity": executed,
+            "execution_price": execution_price,
+            "mid_price_before": mid_price_before,
+        }
+        self._emit_event(
+            "trade", current_day, trade_volume=executed,
+            trade_sign=trade_sign, **common)
+        self._emit_event(
+            "full_execution" if remaining == 0 else "partial_execution",
+            current_day, trade_volume=None, trade_sign=None, **common)
 
     # -- friction ------------------------------------------------------------#
     def set_friction(self, commission_rate: float, tobin_rate: float) -> None:
@@ -183,6 +258,7 @@ class OrderBook:
             return False
 
         trader = trader_map[order.trader_id]
+        cancelled_quantity = order.quantity
         if order.side == 'BUY':
             # Release exactly the cash still escrowed against this order:
             # the telescoped remainder after all partial fills. No
@@ -204,6 +280,13 @@ class OrderBook:
                 and self._dead >= self.COMPACT_RATIO
                 * (len(self._bids) + len(self._asks))):
             self._compact()
+        self._emit_event(
+            "cancellation", self.observation_day,
+            order_id=order.order_id, counterparty_order_id=None,
+            trader_id=order.trader_id, side=order.side,
+            order_type="LIMIT", limit_price=order.price,
+            quantity=cancelled_quantity, executed_quantity=0,
+            execution_price=None, trade_volume=None, trade_sign=None)
         return True
 
     def _compact(self) -> None:
@@ -234,6 +317,13 @@ class OrderBook:
         consumed, avoiding a redundant best-level lookup per fill.
         """
         trades = []
+        submitted_quantity = order.quantity
+        self._emit_event(
+            "order_submission", current_day, order_id=order.order_id,
+            counterparty_order_id=None, trader_id=order.trader_id,
+            side=order.side, order_type="LIMIT", limit_price=order.price,
+            quantity=submitted_quantity, executed_quantity=0,
+            execution_price=None, trade_volume=None, trade_sign=None)
 
         if order.side == 'BUY':
             best = self.best_ask()
@@ -241,6 +331,7 @@ class OrderBook:
                     and order.price >= best.price):
                 trade_price = best.price            # Maker's price
                 trade_qty = min(order.quantity, best.quantity)
+                mid_before = self.get_midpoint(trade_price)
                 self.execute_trade(order.trader_id, best.trader_id,
                                    trade_price, trade_qty, current_day,
                                    trader_map, buyer_is_maker=False,
@@ -248,6 +339,11 @@ class OrderBook:
                 trades.append((current_day, trade_price, trade_qty))
                 order.quantity -= trade_qty
                 best.quantity -= trade_qty
+                self._emit_fill(
+                    order.order_id, order.trader_id, order.side, "LIMIT",
+                    order.price, order.quantity, submitted_quantity,
+                    trade_qty, trade_price, current_day, best.order_id, 1,
+                    mid_before)
                 if best.quantity == 0:
                     self._retire_top('SELL', trader_map)
                     best = self.best_ask()
@@ -270,6 +366,7 @@ class OrderBook:
                     and order.price <= best.price):
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
+                mid_before = self.get_midpoint(trade_price)
                 self.execute_trade(best.trader_id, order.trader_id,
                                    trade_price, trade_qty, current_day,
                                    trader_map, buyer_is_maker=True,
@@ -277,6 +374,11 @@ class OrderBook:
                 trades.append((current_day, trade_price, trade_qty))
                 order.quantity -= trade_qty
                 best.quantity -= trade_qty
+                self._emit_fill(
+                    order.order_id, order.trader_id, order.side, "LIMIT",
+                    order.price, order.quantity, submitted_quantity,
+                    trade_qty, trade_price, current_day, best.order_id, -1,
+                    mid_before)
                 if best.quantity == 0:
                     self._retire_top('BUY', trader_map)
                     best = self.best_bid()
@@ -295,6 +397,13 @@ class OrderBook:
                              current_day: int) -> list:
         """Sweeps resting liquidity; any unfilled remainder expires."""
         trades = []
+        submitted_quantity = order.quantity
+        self._emit_event(
+            "order_submission", current_day, order_id=None,
+            counterparty_order_id=None, trader_id=order.trader_id,
+            side=order.side, order_type="MARKET", limit_price=None,
+            quantity=submitted_quantity, executed_quantity=0,
+            execution_price=None, trade_volume=None, trade_sign=None)
 
         if order.side == 'BUY':
             buyer = trader_map[order.trader_id]
@@ -302,6 +411,7 @@ class OrderBook:
             while order.quantity > 0 and best is not None:
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
+                mid_before = self.get_midpoint(trade_price)
                 cost_per_share = trade_price * (1.0 + self.commission_rate)
                 if buyer.cash < trade_qty * cost_per_share:
                     trade_qty = int(buyer.cash // cost_per_share)
@@ -314,6 +424,10 @@ class OrderBook:
                 trades.append((current_day, trade_price, trade_qty))
                 order.quantity -= trade_qty
                 best.quantity -= trade_qty
+                self._emit_fill(
+                    None, order.trader_id, order.side, "MARKET", None,
+                    order.quantity, submitted_quantity, trade_qty,
+                    trade_price, current_day, best.order_id, 1, mid_before)
                 if best.quantity == 0:
                     self._retire_top('SELL', trader_map)
                     best = self.best_ask()
@@ -323,6 +437,7 @@ class OrderBook:
             while order.quantity > 0 and best is not None:
                 trade_price = best.price
                 trade_qty = min(order.quantity, best.quantity)
+                mid_before = self.get_midpoint(trade_price)
                 self.execute_trade(best.trader_id, order.trader_id,
                                    trade_price, trade_qty, current_day,
                                    trader_map, buyer_is_maker=True,
@@ -330,6 +445,10 @@ class OrderBook:
                 trades.append((current_day, trade_price, trade_qty))
                 order.quantity -= trade_qty
                 best.quantity -= trade_qty
+                self._emit_fill(
+                    None, order.trader_id, order.side, "MARKET", None,
+                    order.quantity, submitted_quantity, trade_qty,
+                    trade_price, current_day, best.order_id, -1, mid_before)
                 if best.quantity == 0:
                     self._retire_top('BUY', trader_map)
                     best = self.best_bid()

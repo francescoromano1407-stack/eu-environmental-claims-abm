@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import shutil
 import sys
@@ -26,7 +25,9 @@ from typing import Any, Iterable, Sequence
 from market_sim.parameter_registry import REGISTRY, gsa_space
 from market_sim.sensitivity_campaign import (CampaignConfig, DEFAULT_REGIMES,
                                               latin_hypercube_design,
-                                              run_campaign)
+                                              run_campaign,
+                                              summarize_campaign,
+                                              validate_draw_payload)
 
 
 NOTICE = "Simulation-based policy experiment; not an empirical forecast."
@@ -76,6 +77,11 @@ def create_run_directory(args: argparse.Namespace) -> Path:
         if not (run_dir / "manifest.json").is_file():
             raise ValueError("--resume must name an existing campaign directory")
         return run_dir
+    existing = Path(args.existing_root).resolve()
+    if ((existing / "manifest.json").is_file()
+            and (existing / "configuration.json").is_file()
+            and (existing / "raw").is_dir()):
+        return existing
     return (Path(args.output_root) / _timestamp()).resolve()
 
 
@@ -221,7 +227,8 @@ def write_raw_metric_table(raw_dir: Path, summaries: Path, label: str) -> None:
             })
 
 
-def _identity_matches(manifest: dict[str, Any], config: CampaignConfig) -> bool:
+def _identity_mismatch(manifest: dict[str, Any],
+                       config: CampaignConfig) -> list[str]:
     """Return whether a candidate directory belongs to this exact design.
 
     A matching horizon alone is insufficient: resuming from a different LHS
@@ -231,46 +238,36 @@ def _identity_matches(manifest: dict[str, Any], config: CampaignConfig) -> bool:
     """
     previous = manifest.get("config", manifest.get("configuration", {}))
     expected = config.to_dict()
-    return all(previous.get(key) == expected.get(key) for key in (
+    return [key for key in (
         "draws", "replications", "horizon_days", "master_seed",
-        "supervision_base_seed", "regimes"))
+        "supervision_base_seed", "regimes", "num_traders",
+        "num_manipulators", "enable_credit")
+        if previous.get(key) != expected.get(key)]
+
+
+def _identity_matches(manifest: dict[str, Any], config: CampaignConfig) -> bool:
+    return not _identity_mismatch(manifest, config)
 
 
 def _valid_draw_payload(payload: Any, config: CampaignConfig, draw: int,
                         sample: dict[str, float]) -> bool:
     """Validate a completed raw draw before permitting it to be reused."""
-    if not isinstance(payload, dict) or payload.get("complete") is not True:
-        return False
-    if (payload.get("draw") != draw or payload.get("sample") != sample
-            or payload.get("horizon_days") != config.horizon_days
-            or payload.get("replications") != config.replications
-            or payload.get("regimes") != list(config.regimes)):
-        return False
-    rows = payload.get("rows")
-    if not isinstance(rows, list) or len(rows) != config.replications * len(config.regimes):
-        return False
-    expected_rows = {
-        (replication, regime): (config.market_seed(draw, replication),
-                                config.supervision_seed(draw, replication))
-        for replication in range(config.replications)
-        for regime in config.regimes
-    }
-    observed: set[tuple[int, str]] = set()
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("metrics"), dict):
-            return False
-        key = (row.get("replication"), row.get("regime"))
-        if key not in expected_rows or key in observed:
-            return False
-        if (row.get("market_seed"), row.get("supervision_seed")) != expected_rows[key]:
-            return False
-        try:
-            if not all(math.isfinite(float(value)) for value in row["metrics"].values()):
-                return False
-        except (TypeError, ValueError):
-            return False
-        observed.add(key)
-    return observed == set(expected_rows)
+    return validate_draw_payload(payload, config, draw, sample)[0]
+
+
+def _read_draw(path: Path, config: CampaignConfig, draw: int,
+               sample: dict[str, float]) -> tuple[dict[str, Any] | None, str]:
+    if not path.is_file():
+        return None, "file is missing"
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as error:
+        return None, f"corrupt JSON: {error.msg}"
+    except OSError as error:
+        return None, f"unreadable file: {error}"
+    valid, reason = validate_draw_payload(payload, config, draw, sample)
+    return (payload if valid else None), reason
 
 
 def _load_candidate_manifest(directory: Path) -> dict[str, Any] | None:
@@ -287,6 +284,9 @@ def _candidate_raw_directories(args: argparse.Namespace, run_dir: Path,
     """Find both the active run and historical campaign outputs to inspect."""
     candidates = [destination]
     root = Path(args.existing_root).resolve()
+    flattened = root / "raw" / plan.label
+    if flattened.is_dir():
+        candidates.append(flattened)
     legacy = root / f"campaign_{plan.days}d"
     if legacy.is_dir():
         candidates.append(legacy)
@@ -306,6 +306,107 @@ def _candidate_raw_directories(args: argparse.Namespace, run_dir: Path,
     return unique
 
 
+def inspect_completed_draws(args: argparse.Namespace, run_dir: Path,
+                            destination: Path, plan: HorizonPlan,
+                            config: CampaignConfig) -> dict[str, Any]:
+    """Read-only audit of active and historical raw draw files.
+
+    The active directory wins.  A draw from a historical directory is only
+    listed as importable when both its manifest identity and its complete
+    draw payload match the exact requested campaign.
+    """
+    design = latin_hypercube_design(config.master_seed, config.draws)
+    accepted_sources: list[Path] = []
+    rejected_directories: list[dict[str, Any]] = []
+    for candidate in _candidate_raw_directories(
+            args, run_dir, destination, plan):
+        manifest = _load_candidate_manifest(candidate)
+        if manifest is None:
+            rejected_directories.append({
+                "path": str(candidate),
+                "reason": "manifest.json is missing, corrupt, or not an object",
+            })
+            continue
+        mismatch = _identity_mismatch(manifest, config)
+        if mismatch:
+            rejected_directories.append({
+                "path": str(candidate),
+                "reason": "campaign identity mismatch: " + ", ".join(mismatch),
+            })
+            continue
+        accepted_sources.append(candidate)
+
+    reused: list[int] = []
+    importable: list[dict[str, Any]] = []
+    rejected_draws: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for draw, sample in enumerate(design):
+        target = destination / f"draw_{draw:04d}.json"
+        payload, target_reason = _read_draw(target, config, draw, sample)
+        if payload is not None:
+            reused.append(draw)
+            continue
+        if target.is_file():
+            rejected_draws.append({
+                "draw": draw, "path": str(target), "reason": target_reason,
+            })
+        replacement: tuple[Path, dict[str, Any]] | None = None
+        for candidate in accepted_sources:
+            if candidate == destination:
+                continue
+            source = candidate / target.name
+            candidate_payload, reason = _read_draw(
+                source, config, draw, sample)
+            if candidate_payload is not None:
+                replacement = source, candidate_payload
+                break
+            if source.is_file():
+                rejected_draws.append({
+                    "draw": draw, "path": str(source), "reason": reason,
+                })
+        if replacement is not None:
+            importable.append({
+                "draw": draw, "source": str(replacement[0]),
+                "destination": str(target),
+            })
+        else:
+            unresolved.append({
+                "draw": draw, "path": str(target), "reason": target_reason,
+            })
+    return {
+        "label": plan.label,
+        "horizon_days": plan.days,
+        "target_draws": config.draws,
+        "valid_existing_draws": len(reused),
+        "valid_existing_draw_ids": reused,
+        "importable_draws": len(importable),
+        "importable_draw_details": importable,
+        "ready_without_simulation": len(reused) + len(importable),
+        "missing_or_invalid_draws": unresolved,
+        "rejected_draws": rejected_draws,
+        "candidate_sources": [str(path) for path in accepted_sources],
+        "rejected_candidate_directories": rejected_directories,
+    }
+
+
+def print_inspection(audit: dict[str, Any]) -> None:
+    print(f"[{audit['horizon_days']} days / {audit['label']}]", flush=True)
+    print("  valid existing draws: "
+          f"{audit['valid_existing_draws']}/{audit['target_draws']}",
+          flush=True)
+    print(f"  valid draws available to import: {audit['importable_draws']}",
+          flush=True)
+    unresolved = audit["missing_or_invalid_draws"]
+    print(f"  missing or invalid draws requiring simulation: {len(unresolved)}",
+          flush=True)
+    if unresolved:
+        for item in unresolved:
+            print(f"    draw_{item['draw']:04d}: {item['reason']} "
+                  f"({item['path']})", flush=True)
+    else:
+        print("    none", flush=True)
+
+
 def hydrate_completed_draws(args: argparse.Namespace, run_dir: Path,
                             destination: Path, plan: HorizonPlan,
                             config: CampaignConfig) -> dict[str, Any]:
@@ -316,51 +417,19 @@ def hydrate_completed_draws(args: argparse.Namespace, run_dir: Path,
     replace them atomically.  Missing draws are left for ``run_campaign``.
     """
     destination.mkdir(parents=True, exist_ok=True)
-    design = latin_hypercube_design(config.master_seed, config.draws)
-    imported = 0
-    valid_existing = 0
-    rejected_directories: list[str] = []
-    sources: list[str] = []
-    for candidate in _candidate_raw_directories(args, run_dir, destination, plan):
-        manifest = _load_candidate_manifest(candidate)
-        if manifest is None or not _identity_matches(manifest, config):
-            rejected_directories.append(str(candidate))
-            continue
-        sources.append(str(candidate))
-        for draw, sample in enumerate(design):
-            source = candidate / f"draw_{draw:04d}.json"
-            if not source.is_file():
-                continue
-            try:
-                with source.open(encoding="utf-8") as handle:
-                    payload = json.load(handle)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not _valid_draw_payload(payload, config, draw, sample):
-                continue
-            target = destination / source.name
-            if candidate == destination:
-                valid_existing += 1
-                continue
-            # Never overwrite a valid active draw; it was inspected first.
-            active_valid = False
-            if target.is_file():
-                try:
-                    with target.open(encoding="utf-8") as handle:
-                        active = json.load(handle)
-                    active_valid = _valid_draw_payload(active, config, draw,
-                                                        sample)
-                except (OSError, json.JSONDecodeError):
-                    pass
-            if not active_valid:
-                _atomic_json(target, payload)
-                imported += 1
+    audit = inspect_completed_draws(
+        args, run_dir, destination, plan, config)
+    imported: list[int] = []
+    for item in audit["importable_draw_details"]:
+        source = Path(item["source"])
+        with source.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+        _atomic_json(Path(item["destination"]), payload)
+        imported.append(item["draw"])
     return {
-        "valid_existing_draws": valid_existing,
-        "imported_draws": imported,
-        "candidate_sources": sources,
-        "rejected_candidate_directories": rejected_directories,
-        "target_draws": config.draws,
+        **audit,
+        "imported_draws": len(imported),
+        "imported_draw_ids": imported,
     }
 
 
@@ -374,20 +443,48 @@ def run_plan(run_dir: Path, args: argparse.Namespace,
         supervision_base_seed=args.supervision_base_seed,
         num_traders=args.num_traders, label=plan.label, subset=plan.subset,
     )
+    preflight = inspect_completed_draws(
+        args, run_dir, raw_dir, plan, config)
     reuse = hydrate_completed_draws(args, run_dir, raw_dir, plan, config)
+    after_import = inspect_completed_draws(
+        args, run_dir, raw_dir, plan, config)
+    pending_before_run = {
+        item["draw"] for item in after_import["missing_or_invalid_draws"]}
     started = time.time()
     with log.open("a", encoding="utf-8") as handle:
-        handle.write(f"{_utc_now()} started {plan.label}\n")
+        handle.write(f"{_utc_now()} inspected {plan.label}: "
+                     f"{len(pending_before_run)} draws require simulation\n")
         try:
-            summary = run_campaign(config, progress=True)
+            if pending_before_run:
+                summary = run_campaign(config, progress=True)
+            else:
+                summary = summarize_campaign(str(raw_dir), config=config)
         except Exception as error:
             handle.write(f"{_utc_now()} failed: {type(error).__name__}: {error}\n")
             _update_manifest(run_dir, status="failed")
             raise
         handle.write(f"{_utc_now()} completed in {time.time() - started:.3f}s\n")
+    final_audit = inspect_completed_draws(
+        args, run_dir, raw_dir, plan, config)
+    still_pending = {
+        item["draw"] for item in final_audit["missing_or_invalid_draws"]}
+    ledger = {
+        "created_utc": _utc_now(),
+        "notice": NOTICE,
+        "design_identity": config.to_dict(),
+        "reused_draws": preflight["valid_existing_draw_ids"],
+        "imported_draws": reuse["imported_draw_ids"],
+        "rejected_draws": preflight["rejected_draws"],
+        "rejected_candidate_directories":
+            preflight["rejected_candidate_directories"],
+        "newly_run_draws": sorted(pending_before_run - still_pending),
+        "remaining_missing_or_invalid_draws":
+            final_audit["missing_or_invalid_draws"],
+    }
+    _atomic_json(raw_dir / "completion_ledger.json", ledger)
     _copy_summary_artifacts(raw_dir, run_dir / "summaries", plan.label)
     write_raw_metric_table(raw_dir, run_dir / "summaries", plan.label)
-    return summary, reuse
+    return summary, ledger
 
 
 def _figure_footer(figure: Any, summary: dict[str, Any]) -> None:
@@ -566,9 +663,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-traders", type=int, default=8)
     parser.add_argument("--confirmation", action="store_true", help="Add all 200 draws at 365 days")
     parser.add_argument("--long-horizons", help="Add all 200 draws at horizons 1000 and/or 2000")
-    parser.add_argument("--full-robustness", action="store_true", help="Add complete 365-, 1000-, and 2000-day campaigns")
+    parser.add_argument("--full-robustness", dest="full_robustness",
+                        action="store_true",
+                        help="Inspect/complete 120, 365, 1000, and 2000 days (default)")
+    parser.add_argument("--base-horizon-only", dest="full_robustness",
+                        action="store_false",
+                        help="Inspect only --horizon instead of all four publication horizons")
     parser.add_argument("--existing-root", default="results", help="Root containing prior campaign directories to inspect")
     parser.add_argument("--development", action="store_true", help="Permit smaller non-publication design")
+    parser.add_argument(
+        "--execute-missing", action="store_true",
+        help=("Explicitly permit simulations for the exact missing/invalid "
+              "draws printed by the preflight audit"))
+    parser.add_argument(
+        "--rebuild-only", action="store_true",
+        help=("Regenerate summaries/tables/figures without simulation; "
+              "refuse if any draw still requires simulation"))
+    parser.set_defaults(full_robustness=True)
     return parser
 
 
@@ -578,6 +689,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise ValueError("publication campaign requires >=200 draws, >=3 replications, and >=120 days")
     plans = planned_horizons(args)
     run_dir = create_run_directory(args)
+    audits = []
+    for plan in plans:
+        raw_dir = run_dir / "raw" / plan.label
+        config = CampaignConfig(
+            outdir=str(raw_dir), draws=args.draws,
+            replications=args.replications, horizon_days=plan.days,
+            master_seed=args.master_seed,
+            supervision_base_seed=args.supervision_base_seed,
+            num_traders=args.num_traders, label=plan.label,
+            subset=plan.subset,
+        )
+        audit = inspect_completed_draws(
+            args, run_dir, raw_dir, plan, config)
+        audits.append(audit)
+        print_inspection(audit)
+    if not args.execute_missing and not args.rebuild_only:
+        print("DRY RUN ONLY: no files changed and no simulation executed. "
+              "Use --execute-missing only after reviewing the lists above.",
+              flush=True)
+        return
+    if args.rebuild_only and any(
+            audit["missing_or_invalid_draws"] for audit in audits):
+        raise ValueError(
+            "--rebuild-only refused: at least one draw requires simulation; "
+            "review the exact preflight list above")
     initialise(run_dir, args, plans)
     summaries = []
     _update_manifest(run_dir, status="running")

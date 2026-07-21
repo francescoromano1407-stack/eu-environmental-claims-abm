@@ -1,0 +1,405 @@
+{
+  "base_replications": 3,
+  "completed_utc": "2026-07-16T20:30:26Z",
+  "created_utc": "2026-07-16T19:53:03Z",
+  "final_audit": {
+    "horizons": {
+      "horizon_120d": {
+        "days": 120,
+        "invalid_draws": [],
+        "missing_draws": [],
+        "valid_draws": [
+          41,
+          42,
+          69,
+          71,
+          75,
+          104,
+          109,
+          136,
+          144,
+          147,
+          180,
+          187
+        ]
+      },
+      "robustness_1000d": {
+        "days": 1000,
+        "invalid_draws": [],
+        "missing_draws": [],
+        "valid_draws": [
+          41,
+          42,
+          69,
+          71,
+          75,
+          104,
+          109,
+          136,
+          144,
+          147,
+          180,
+          187
+        ]
+      },
+      "robustness_2000d": {
+        "days": 2000,
+        "invalid_draws": [],
+        "missing_draws": [],
+        "valid_draws": [
+          41,
+          42,
+          69,
+          71,
+          75,
+          104,
+          109,
+          136,
+          144,
+          147,
+          180,
+          187
+        ]
+      },
+      "robustness_365d": {
+        "days": 365,
+        "invalid_draws": [],
+        "missing_draws": [],
+        "valid_draws": [
+          41,
+          42,
+          69,
+          71,
+          75,
+          104,
+          109,
+          136,
+          144,
+          147,
+          180,
+          187
+        ]
+      }
+    },
+    "selected_draws": [
+      41,
+      42,
+      69,
+      71,
+      75,
+      104,
+      109,
+      136,
+      144,
+      147,
+      180,
+      187
+    ],
+    "target_replications": 15
+  },
+  "notice": "Simulation-based robustness extension; not an empirical forecast.",
+  "preflight": {
+    "horizons": {
+      "horizon_120d": {
+        "days": 120,
+        "invalid_draws": [],
+        "missing_draws": [
+          {
+            "draw": 41,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0041.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 42,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0042.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 69,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0069.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 71,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0071.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 75,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0075.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 104,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0104.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 109,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0109.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 136,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0136.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 144,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0144.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 147,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0147.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 180,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0180.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 187,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\horizon_120d\\draw_0187.json",
+            "reason": "extension file is missing"
+          }
+        ],
+        "valid_draws": []
+      },
+      "robustness_1000d": {
+        "days": 1000,
+        "invalid_draws": [],
+        "missing_draws": [
+          {
+            "draw": 41,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0041.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 42,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0042.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 69,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0069.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 71,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0071.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 75,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0075.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 104,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0104.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 109,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0109.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 136,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0136.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 144,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0144.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 147,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0147.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 180,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0180.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 187,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_1000d\\draw_0187.json",
+            "reason": "extension file is missing"
+          }
+        ],
+        "valid_draws": []
+      },
+      "robustness_2000d": {
+        "days": 2000,
+        "invalid_draws": [],
+        "missing_draws": [
+          {
+            "draw": 41,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0041.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 42,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0042.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 69,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0069.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 71,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0071.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 75,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0075.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 104,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0104.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 109,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0109.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 136,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0136.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 144,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0144.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 147,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0147.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 180,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0180.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 187,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_2000d\\draw_0187.json",
+            "reason": "extension file is missing"
+          }
+        ],
+        "valid_draws": []
+      },
+      "robustness_365d": {
+        "days": 365,
+        "invalid_draws": [],
+        "missing_draws": [
+          {
+            "draw": 41,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0041.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 42,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0042.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 69,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0069.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 71,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0071.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 75,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0075.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 104,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0104.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 109,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0109.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 136,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0136.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 144,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0144.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 147,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0147.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 180,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0180.json",
+            "reason": "extension file is missing"
+          },
+          {
+            "draw": 187,
+            "path": "C:\\Users\\slend\\Desktop\\Financial-market-simulation\\Economy_financial\\results\\replication_robustness\\robustness_365d\\draw_0187.json",
+            "reason": "extension file is missing"
+          }
+        ],
+        "valid_draws": []
+      }
+    },
+    "selected_draws": [
+      41,
+      42,
+      69,
+      71,
+      75,
+      104,
+      109,
+      136,
+      144,
+      147,
+      180,
+      187
+    ],
+    "target_replications": 15
+  },
+  "selected_draws": [
+    41,
+    42,
+    69,
+    71,
+    75,
+    104,
+    109,
+    136,
+    144,
+    147,
+    180,
+    187
+  ],
+  "selection_method": "deterministic maximin coverage of standardized cross-horizon outcomes",
+  "status": "complete",
+  "target_replications": 15
+}
