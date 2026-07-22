@@ -1,6 +1,6 @@
 {
  "audit_schema": "paper-repository-consistency/v1",
- "audit_utc": "2026-07-18T14:57:16+00:00",
+ "audit_utc": "2026-07-22T09:50:17+00:00",
  "manuscript": "Francesco_Romano_EU_Environmental_Claims_ABM_Paper_revised.docx",
  "manuscript_is_authoritative": true,
  "notice": "Read-only consistency audit; no simulation campaign was executed and no result file was modified.",
@@ -597,7 +597,7 @@
    "claim": "Every reference-list entry is cited in the body",
    "evidence": "manuscript body vs reference list",
    "status": "consistent",
-   "observed": "29 entries checked",
+   "observed": "38 entries checked",
    "discrepancy": "",
    "correction_applied": "none (manuscript-internal)",
    "material_for_publication": false

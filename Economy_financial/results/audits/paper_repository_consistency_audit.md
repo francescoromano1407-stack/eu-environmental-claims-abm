@@ -1,6 +1,6 @@
 # Paper-Repository Consistency Audit
 
-- Audit time (UTC): `2026-07-18T14:57:16+00:00`
+- Audit time (UTC): `2026-07-22T09:50:17+00:00`
 - Authoritative reference: `Francesco_Romano_EU_Environmental_Claims_ABM_Paper_revised.docx`
 - Checked claims: 55
 - Status counts: `consistent`: 55
@@ -124,7 +124,7 @@ parsing of the manuscript and repository files.
 - **X3** — tables=[1, 2, 3, 4, 5, 6, 7, 8, 9], figures=[1, 2, 3]
 - **X4** — Plotted data match Table 5 exactly (0.475/0.48/0.045; 0.53/0.38/0.09; 0.355/0.135/0.51; 0.335/0.07/0.595). Embedded title repainted 2026-07-18 to 'Figure 2. Default-weight winner shares across horizons' and footnote to 'Horizons 120, 365, 1,000, and 2,000 days; ...' via tools/apply_editorial_fixes.py; plotted data untouched; verified visually.
 - **X5** — 10 figure files: fig01_paired_effects.png, fig02_paired_effects.png, fig03_greenwashing_greenhushing_frontier.png, fig04_cost_effectiveness.png...
-- **X6** — 29 entries checked
+- **X6** — 38 entries checked
 - **X7** — no contradictions found
 
 ## Corrections applied
