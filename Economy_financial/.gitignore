@@ -38,9 +38,36 @@ desktop.ini
 *.bak
 *.orig
 *.log
+!/results/**/*.log
 ~$*.docx
 _qa_*/
 rendered/
 .~lock.*#
+
+# Task-local scripts and render scratch space
+/tmp/
+
+# Local SSRN screening/audit artifacts (not manuscript or replication inputs)
+/audit_outputs/SSRN_SCREENING_AND_INTEGRITY_REVIEW.md
+/audit_outputs/SSRN_RESUBMISSION_PACKAGE.md
+/audit_outputs/FILE_INVENTORY.csv
+/audit_outputs/FILE_INVENTORY_SUMMARY.json
+/audit_outputs/CLEAN_REVISED_MANUSCRIPT_AUTHOR_ACTION.md
+/audit_outputs/SSRN_SCREENING_NOTES*.md
+/audit_outputs/SSRN_*_EDITORIAL_REVIEW*.md
+/audit_outputs/SSRN_*_AUDIT*.md
+/audit_outputs/CLEAN_REVISED_MANUSCRIPT_AUTHOR_ACTION.docx
+/audit_outputs/CLEAN_REVISED_MANUSCRIPT_AUTHOR_ACTION.pdf
+/audit_outputs/Francesco_Romano_EU_Environmental_Claims_ABM_SSRN_AUTHOR_CONFIRMATION.docx
+/audit_outputs/Francesco_Romano_EU_Environmental_Claims_ABM_SSRN_AUTHOR_CONFIRMATION.pdf
+/audit_outputs/GITIGNORE_RULE_SUMMARY.md
+/audit_outputs/SSRN_AUTHOR_CONFIRMATION_CHECKLIST.md
+/audit_outputs/SSRN_FINAL_CHANGE_LOG.md
+
+# Temporary document-render and visual-diff outputs
+/audit_outputs/_qa_*/
+/audit_outputs/page-*.png
+/audit_outputs/*_rendered_preview.pdf
+/audit_outputs/*_visual_diff*.png
 
 # Intentionally not ignored: source, DOCX manuscripts, results/, and provenance/
